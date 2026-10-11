@@ -1,0 +1,276 @@
+
+import fitz
+import os
+import re
+
+
+# --------------------------------------------------
+# STEP 1: Set the project and input folder paths
+# --------------------------------------------------
+
+project_folder = os.path.dirname(os.path.abspath(__file__))
+input_folder = os.path.join(project_folder, "input")
+report_path = os.path.join(project_folder, "inspect_report.txt")
+
+report = []
+
+
+def add_line(message=""):
+    """Print the message and store it for the report."""
+    message = str(message)
+    print(message)
+    report.append(message)
+
+
+# --------------------------------------------------
+# STEP 2: Start the inspection report
+# --------------------------------------------------
+
+add_line("=" * 70)
+add_line("PDF INSPECTION REPORT")
+add_line("=" * 70)
+add_line("Project folder: " + project_folder)
+add_line("Input folder: " + input_folder)
+add_line("")
+
+
+# --------------------------------------------------
+# STEP 3: Check whether the input folder exists
+# --------------------------------------------------
+
+pdf_files = []
+
+if not os.path.isdir(input_folder):
+
+    add_line("ERROR: Input folder not found.")
+    add_line("Expected location: " + input_folder)
+
+else:
+
+    # Find all PDF files, ignoring filename case
+    pdf_files = sorted(
+        filename
+        for filename in os.listdir(input_folder)
+        if filename.lower().endswith(".pdf")
+        and os.path.isfile(os.path.join(input_folder, filename))
+    )
+
+    add_line("PDF files found: " + repr(pdf_files))
+    add_line("Total PDF files found: " + str(len(pdf_files)))
+    add_line("")
+
+
+# --------------------------------------------------
+# STEP 4: Inspect each PDF separately
+# --------------------------------------------------
+
+total_pdfs_opened = 0
+total_pages_read = 0
+total_procedures = 0
+total_step_candidates = 0
+total_status_words = 0
+
+for filename in pdf_files:
+
+    pdf_path = os.path.join(input_folder, filename)
+
+    add_line("=" * 70)
+    add_line("PDF FILE: " + filename)
+    add_line("=" * 70)
+
+    pdf = None
+
+    pages_read = 0
+    matching_pages = 0
+    procedure_count = 0
+    step_candidate_count = 0
+    status_word_count = 0
+    page_errors = 0
+
+    sample_pages = []
+
+    try:
+
+        pdf = fitz.open(pdf_path)
+        total_pdfs_opened += 1
+
+        add_line("Total pages in PDF: " + str(len(pdf)))
+
+        # Read every page of this PDF
+        for page_index in range(len(pdf)):
+
+            page_number = page_index + 1
+
+            try:
+
+                page = pdf[page_index]
+                text = page.get_text()
+                pages_read += 1
+
+            except Exception as error:
+
+                page_errors += 1
+
+                add_line(
+                    "ERROR reading page "
+                    + str(page_number)
+                    + ": "
+                    + repr(error)
+                )
+
+                continue
+
+            # Count procedure headings on this page
+            procedure_count += len(
+                re.findall(
+                    r"Procedure\s*:",
+                    text,
+                    re.IGNORECASE
+                )
+            )
+
+            # Count possible STEP IDs at the start of lines
+            step_candidate_count += len(
+                re.findall(
+                    r"^\s*\d+\.\d+\b",
+                    text,
+                    re.MULTILINE
+                )
+            )
+
+            # Count occurrences of recognized status words
+            status_word_count += len(
+                re.findall(
+                    r"\b(Success|Failure|Progress|Suspend)\b",
+                    text,
+                    re.IGNORECASE
+                )
+            )
+
+            # Keep only a small sample of relevant pages
+            has_relevant_text = re.search(
+                r"Procedure\s*:|\d+\.\d+|"
+                r"\b(Success|Failure|Progress|Suspend)\b",
+                text,
+                re.IGNORECASE
+            )
+
+            if has_relevant_text:
+
+                matching_pages += 1
+
+                if len(sample_pages) < 5:
+                    sample_pages.append(
+                        (page_number, text)
+                    )
+
+        # Print statistics for this PDF
+        add_line("Pages actually read: " + str(pages_read))
+        add_line(
+            "Pages with relevant text: " + str(matching_pages)
+        )
+        add_line(
+            "Procedure headings found: " + str(procedure_count)
+        )
+        add_line(
+            "Possible STEP IDs found: " + str(step_candidate_count)
+        )
+        add_line(
+            "Status-word occurrences: " + str(status_word_count)
+        )
+        add_line("Page-reading errors: " + str(page_errors))
+
+        # Show a limited sample of extracted lines
+        add_line("")
+        add_line("SAMPLE EXTRACTED TEXT:")
+
+        if not sample_pages:
+            add_line("No matching text found in this PDF.")
+
+        for page_number, text in sample_pages:
+
+            add_line("")
+            add_line("--- PAGE " + str(page_number) + " ---")
+
+            printed_lines = 0
+
+            for line_number, line in enumerate(
+                text.splitlines(),
+                start=1
+            ):
+
+                if re.search(
+                    r"Procedure\s*:|\d+\.\d+|"
+                    r"\b(Success|Failure|Progress|Suspend)\b",
+                    line,
+                    re.IGNORECASE
+                ):
+
+                    add_line(
+                        str(line_number) + ": " + repr(line)
+                    )
+
+                    printed_lines += 1
+
+                    if printed_lines >= 30:
+                        add_line(
+                            "Additional matching lines omitted."
+                        )
+                        break
+
+    except Exception as error:
+
+        add_line("ERROR opening or inspecting this PDF:")
+        add_line(repr(error))
+
+    finally:
+
+        if pdf is not None:
+            pdf.close()
+
+    # Add this PDF's statistics to the overall totals
+    total_pages_read += pages_read
+    total_procedures += procedure_count
+    total_step_candidates += step_candidate_count
+    total_status_words += status_word_count
+
+    add_line("")
+
+
+# --------------------------------------------------
+# STEP 5: Print the overall summary
+# --------------------------------------------------
+
+add_line("=" * 70)
+add_line("OVERALL SUMMARY")
+add_line("=" * 70)
+add_line("PDF files discovered: " + str(len(pdf_files)))
+add_line("PDF files opened: " + str(total_pdfs_opened))
+add_line("Total pages read: " + str(total_pages_read))
+add_line("Total procedure headings: " + str(total_procedures))
+add_line("Total possible STEP IDs: " + str(total_step_candidates))
+add_line("Total status-word occurrences: " + str(total_status_words))
+add_line("")
+
+
+# --------------------------------------------------
+# STEP 6: Save the report as a text file
+# --------------------------------------------------
+
+try:
+
+    with open(report_path, "w") as report_file:
+        report_file.write("\n".join(report) + "\n")
+
+    print("")
+    print("Report saved successfully:")
+    print(report_path)
+
+except Exception as error:
+
+    print("")
+    print("ERROR: Could not save the inspection report.")
+    print(repr(error))
+
+print("")
+print("Inspection script finished.")
