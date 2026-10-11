@@ -1,3 +1,4 @@
+inspect_pdf_text code for that --
 
 import fitz
 import os
@@ -274,3 +275,269 @@ except Exception as error:
 
 print("")
 print("Inspection script finished.")
+
+------------------------------------------------------------------------------------------------------------------------------------------------------
+code for >> inspect_step_records.py
+
+
+import fitz
+import os
+import re
+
+
+# --------------------------------------------------
+# STEP 1: Set project paths
+# --------------------------------------------------
+
+project_folder = os.path.dirname(os.path.abspath(__file__))
+input_folder = os.path.join(project_folder, "input")
+
+report_path = os.path.join(
+    project_folder,
+    "step_inspection_report.txt"
+)
+
+report = []
+
+
+def add_line(message=""):
+    message = str(message)
+    print(message)
+    report.append(message)
+
+
+# --------------------------------------------------
+# STEP 2: Start the report
+# --------------------------------------------------
+
+add_line("=" * 70)
+add_line("STEP ID AND STATUS INSPECTION")
+add_line("=" * 70)
+add_line("Project folder: " + project_folder)
+add_line("Input folder: " + input_folder)
+add_line("")
+
+
+# --------------------------------------------------
+# STEP 3: Find PDF files
+# --------------------------------------------------
+
+pdf_files = []
+
+if not os.path.isdir(input_folder):
+
+    add_line("ERROR: Input folder not found.")
+    add_line("Expected location: " + input_folder)
+
+else:
+
+    pdf_files = sorted(
+        filename
+        for filename in os.listdir(input_folder)
+        if filename.lower().endswith(".pdf")
+        and os.path.isfile(os.path.join(input_folder, filename))
+    )
+
+    add_line("PDF files found: " + repr(pdf_files))
+    add_line("Total PDFs found: " + str(len(pdf_files)))
+    add_line("")
+
+
+# --------------------------------------------------
+# STEP 4: Inspect every PDF
+# --------------------------------------------------
+
+total_pdfs_opened = 0
+total_pages_read = 0
+total_candidates = 0
+max_samples_per_pdf = 80
+
+for filename in pdf_files:
+
+    pdf_path = os.path.join(input_folder, filename)
+
+    add_line("=" * 70)
+    add_line("PDF FILE: " + filename)
+    add_line("=" * 70)
+
+    pdf = None
+    pdf_candidates = 0
+    pages_read = 0
+    page_errors = 0
+
+    # Store only a limited number of text samples
+    samples = []
+
+    try:
+
+        pdf = fitz.open(pdf_path)
+        total_pdfs_opened += 1
+
+        add_line("Total pages in PDF: " + str(len(pdf)))
+
+        # Read every page, including pages after the sample limit
+        for page_index in range(len(pdf)):
+
+            page_number = page_index + 1
+
+            try:
+
+                page = pdf[page_index]
+                text = page.get_text()
+                pages_read += 1
+
+            except Exception as error:
+
+                page_errors += 1
+
+                add_line(
+                    "ERROR reading page "
+                    + str(page_number)
+                    + ": "
+                    + repr(error)
+                )
+
+                continue
+
+            lines = text.splitlines()
+
+            for line_index, line in enumerate(lines):
+
+                # Find possible STEP IDs at the beginning
+                # of a line. These are candidates, not
+                # confirmed STEP IDs.
+                if re.match(r"^\s*\d+\.\d+\b", line):
+
+                    pdf_candidates += 1
+
+                    # Save only the first 80 candidates
+                    if len(samples) < max_samples_per_pdf:
+
+                        samples.append(
+                            (
+                                page_number,
+                                line_index,
+                                lines[:]
+                            )
+                        )
+
+        total_pages_read += pages_read
+        total_candidates += pdf_candidates
+
+        add_line("Pages actually read: " + str(pages_read))
+        add_line("Page-reading errors: " + str(page_errors))
+        add_line(
+            "Possible STEP ID candidates: "
+            + str(pdf_candidates)
+        )
+        add_line(
+            "Candidates selected for inspection: "
+            + str(len(samples))
+        )
+
+        add_line("")
+        add_line("EXTRACTED TEXT AROUND CANDIDATES")
+
+        if not samples:
+
+            add_line(
+                "No lines matching the candidate pattern were found."
+            )
+
+        for sample_number, sample in enumerate(samples, start=1):
+
+            page_number, line_index, lines = sample
+
+            add_line("")
+            add_line(
+                "--- SAMPLE "
+                + str(sample_number)
+                + " | PAGE "
+                + str(page_number)
+                + " | LINE "
+                + str(line_index + 1)
+                + " ---"
+            )
+
+            # Show three lines before and five lines after
+            start = max(0, line_index - 3)
+            end = min(len(lines), line_index + 6)
+
+            for context_index in range(start, end):
+
+                if context_index == line_index:
+                    marker = ">>"
+                else:
+                    marker = "  "
+
+                add_line(
+                    marker
+                    + " "
+                    + str(context_index + 1)
+                    + ": "
+                    + repr(lines[context_index])
+                )
+
+        if pdf_candidates > len(samples):
+
+            add_line("")
+            add_line(
+                "Additional candidates exist but were not displayed."
+            )
+
+    except Exception as error:
+
+        add_line("ERROR opening or inspecting PDF:")
+        add_line(repr(error))
+
+    finally:
+
+        if pdf is not None:
+            pdf.close()
+
+    add_line("")
+
+
+# --------------------------------------------------
+# STEP 5: Overall summary
+# --------------------------------------------------
+
+add_line("=" * 70)
+add_line("OVERALL SUMMARY")
+add_line("=" * 70)
+add_line("PDF files discovered: " + str(len(pdf_files)))
+add_line("PDF files opened: " + str(total_pdfs_opened))
+add_line("Total pages read: " + str(total_pages_read))
+add_line(
+    "Total possible STEP ID candidates: "
+    + str(total_candidates)
+)
+add_line("")
+
+
+# --------------------------------------------------
+# STEP 6: Save the report
+# --------------------------------------------------
+
+try:
+
+    with open(report_path, "w", encoding="utf-8") as report_file:
+        report_file.write("\n".join(report) + "\n")
+
+    print("")
+    print("Report saved successfully:")
+    print(report_path)
+
+except Exception as error:
+
+    print("")
+    print("ERROR saving report:")
+    print(repr(error))
+
+print("")
+print("Inspection script finished.")
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+
