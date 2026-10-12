@@ -1,0 +1,188 @@
+1. pdf_parse.py
+Copy this entire code into your pdf_parse.py file.
+
+
+```python
+import re
+
+
+def extract_procedure_info(text):
+    Procedure = ""
+    Time = ""
+    Dur = ""
+
+    match = re.search(
+        r"Procedure\s*:\s*(.*?)\s*(?=Time\s*:|$)",
+        text,
+        re.IGNORECASE | re.MULTILINE
+    )
+    if match:
+        Procedure = match.group(1).strip()
+
+    match = re.search(
+        r"Time\s*:\s*(.*?)\s*(?=Mode\s*:|$)",
+        text,
+        re.IGNORECASE | re.MULTILINE
+    )
+    if match:
+        Time = match.group(1).strip()
+
+    match = re.search(
+        r"Dur\s*:\s*(.*?)\s*(?=Priority\s*:|$)",
+        text,
+        re.IGNORECASE | re.MULTILINE
+    )
+    if match:
+        Dur = match.group(1).strip()
+
+    return Procedure, Time, Dur
+
+
+def extract_status(text):
+    status_data = {}
+    lines = text.splitlines()
+    current_step_id = None
+
+    for line in lines:
+        line = line.strip()
+
+        step_match = re.match(r"^(\d+\.\d+)\b", line)
+        if step_match:
+            current_step_id = step_match.group(1)
+            continue
+
+        status_match = re.search(
+            r"\b(Success|Progress|Suspend|Failure)\b",
+            line,
+            re.IGNORECASE
+        )
+
+        if status_match and current_step_id:
+            status = status_match.group(1).lower()
+
+            if status not in status_data:
+                status_data[status] = []
+
+            status_data[status].append(current_step_id)
+            current_step_id = None
+
+    return status_data
+------------------------------------------------------------------------------------------------------------------
+
+2. main.py
+Copy this entire code into your main.py file.
+
+```python
+import fitz
+import re
+import json
+import os
+from datetime import datetime
+from pdf_parse import extract_procedure_info, extract_status
+
+
+input_folder = "input"
+pdf_files = []
+
+for filename in os.listdir(input_folder):
+    if filename.lower().endswith(".pdf"):
+        pdf_files.append(filename)
+
+pdf_files.sort()
+
+print("PDF files found:", pdf_files)
+
+all_processes = []
+total_pages_read = 0
+total_pdfs_read = 0
+
+for filename in pdf_files:
+    pdf_path = os.path.join(input_folder, filename)
+
+    print("")
+    print("Processing:", filename)
+
+    pdf = fitz.open(pdf_path)
+
+    all_text = ""
+    pages_read = 0
+
+    for page in pdf:
+        all_text = all_text + page.get_text() + "\n"
+        pages_read = pages_read + 1
+
+    total_pages_read = total_pages_read + pages_read
+    total_pdfs_read = total_pdfs_read + 1
+
+    print("Pages read from", filename + ":", pages_read)
+
+    matches = list(
+        re.finditer(
+            r"Procedure\s*:",
+            all_text,
+            re.IGNORECASE
+        )
+    )
+
+    procedure_blocks = []
+
+    for i in range(len(matches)):
+        start = matches[i].start()
+
+        if i + 1 < len(matches):
+            end = matches[i + 1].start()
+        else:
+            end = len(all_text)
+
+        block = all_text[start:end].strip()
+        procedure_blocks.append(block)
+
+    print(
+        "Procedures found in",
+        filename + ":",
+        len(procedure_blocks)
+    )
+
+    for block in procedure_blocks:
+        Procedure, Time, Dur = extract_procedure_info(block)
+
+        status_data = extract_status(block)
+
+        process_data = {
+            "Procedure": Procedure,
+            "Time": Time,
+            "Dur": Dur,
+            "status": status_data
+        }
+
+        all_processes.append(process_data)
+
+    pdf.close()
+
+pdf_info = {
+    "PDFInfo": {
+        "Total PDFs read": total_pdfs_read,
+        "Total Pages read": total_pages_read
+    }
+}
+
+all_processes.append(pdf_info)
+
+for filename in os.listdir("."):
+    if filename.startswith("output_") and filename.endswith(".json"):
+        os.remove(filename)
+
+timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
+output_file = "output_" + timestamp + ".json"
+
+with open(output_file, "w") as file:
+    json.dump(all_processes, file, indent=4)
+
+print("")
+print("====================================")
+print("Total PDFs read:", total_pdfs_read)
+print("Total pages read:", total_pages_read)
+print("Total dictionaries created:", len(all_processes) - 1)
+print("JSON file created:", output_file)
+print("====================================")
+-----------------------------------------------------------------------------------------------------------------
