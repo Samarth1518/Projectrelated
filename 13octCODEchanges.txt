@@ -1,0 +1,1401 @@
+full file 
+
+
+Step 2: Create the folder structure
+
+Inside PDF_to_JSON, create this structure manually.
+
+PDF_to_JSON/
+│
+├── main.py
+├── pdf_parser.py
+│
+├── input/
+│   └── (put your PDF files here)
+│
+├── output/
+│   └── (generated JSON files)
+│
+├── diagnostics/
+│   └── (diagnostic report)
+│
+└── tests/
+    └── test_parser.py
+
+-------------------------------------------------------------------------------------------
+
+Create pdf_parser.py
+
+
+import re
+from datetime import datetime
+
+STATUS_NAMES = ("success", "failure", "suspend", "progress")
+
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+STEP_ID_RE = re.compile(r"^\s*(\d{2}\.\d{3,4})\b")
+
+DATE_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[-/]([A-Za-z]{3}|\d{1,2})[-/](\d{4})"
+    r"\s+(\d{1,2}):(\d{2}):(\d{2})[:.](\d{1,3})(?!\d)",
+    re.IGNORECASE
+)
+
+DATE_RE = re.compile(
+    r"(?<!\d)\d{1,2}[-/](?:[A-Za-z]{3}|\d{1,2})[-/]\d{4}(?!\d)",
+    re.IGNORECASE
+)
+
+TIME_RE = re.compile(
+    r"(?<!\d)\d{1,2}:\d{2}:\d{2}[:.]\d{1,3}(?!\d)"
+)
+
+DURATION_RE = re.compile(
+    r"\bDur\s*:\s*(\d+(?:\.\d+)?)\s*\(s\)",
+    re.IGNORECASE
+)
+
+STATUS_RE = re.compile(r"^(Success|Failure|Suspend|Progress)$", re.IGNORECASE)
+
+
+def normalize_procedure_name(name):
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def normalize_datetime(value):
+    match = DATE_TIME_RE.search(value or "")
+    if not match:
+        return None
+
+    day, month_text, year, hour, minute, second, millis = match.groups()
+
+    if month_text.isdigit():
+        month = int(month_text)
+    else:
+        month = MONTHS.get(month_text.lower()[:3])
+
+    if not month or not 1 <= month <= 12:
+        return None
+
+    try:
+        parsed = datetime(
+            int(year), month, int(day),
+            int(hour), int(minute), int(second)
+        )
+    except ValueError:
+        return None
+
+    millis = millis[:3].ljust(3, "0")
+    return parsed.strftime("%Y-%m-%d %H:%M:%S") + "." + millis
+
+
+def split_procedure_blocks(text):
+    matches = list(re.finditer(r"\bProcedure\s*:", text, re.IGNORECASE))
+    blocks = []
+
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        blocks.append(text[start:end])
+
+    return blocks
+
+
+def extract_metadata(block):
+    name_match = re.search(
+        r"\bProcedure\s*:\s*(.*?)\s+\bTime\s*:",
+        block,
+        re.IGNORECASE | re.DOTALL
+    )
+
+    name = ""
+    if name_match:
+        name = re.sub(r"\s+", " ", name_match.group(1)).strip()
+
+    # The procedure header appears before its STEP table.
+    table_match = re.search(r"\bSTEP\s+ID\b", block, re.IGNORECASE)
+    header = block[:table_match.start()] if table_match else block
+
+    time_match = DATE_TIME_RE.search(header)
+    date_time = normalize_datetime(time_match.group(0)) if time_match else None
+
+    duration_match = DURATION_RE.search(header)
+    duration = int(float(duration_match.group(1))) if duration_match else None
+
+    return name, date_time, duration
+
+
+def remove_date_time(value):
+    value = DATE_TIME_RE.sub(" ", value)
+    value = DATE_RE.sub(" ", value)
+    value = TIME_RE.sub(" ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_mode_line(line):
+    return bool(re.match(r"^\s*MODE\b", line, re.IGNORECASE))
+
+
+def parse_step_row(step_id, row_lines, warnings):
+    description_parts = []
+    found_status = None
+
+    for raw_line in row_lines:
+        line = raw_line.strip()
+        if not line or is_mode_line(line):
+            continue
+
+        # A status by itself is unambiguous.
+        status_match = STATUS_RE.match(line)
+        if status_match:
+            found_status = status_match.group(1).lower()
+            continue
+
+        # Status at the end of a line is considered a table status
+        # only when that line also has a date/time.
+        suffix_match = re.search(
+            r"\b(Success|Failure|Suspend|Progress)\s*$",
+            line,
+            re.IGNORECASE
+        )
+
+        has_date_or_time = bool(DATE_RE.search(line) or TIME_RE.search(line))
+
+        if suffix_match and has_date_or_time:
+            found_status = suffix_match.group(1).lower()
+            line = line[:suffix_match.start()].strip()
+
+        # Remove dates and times from the description but preserve words
+        # such as "Success" and "Failure" when they are ordinary text.
+        cleaned = remove_date_time(line)
+
+        # Remove leading STEP ID if it occurs again in a wrapped extraction.
+        cleaned = STEP_ID_RE.sub("", cleaned).strip()
+
+        if cleaned:
+            description_parts.append(cleaned)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+
+    if found_status is None:
+        warnings.append(
+            "STEP " + step_id +
+            " has no confidently detected status; it was not added to a status list."
+        )
+
+    return found_status, description
+
+
+def extract_steps(block):
+    status = dict((name, []) for name in STATUS_NAMES)
+    descriptions = {}
+    warnings = []
+
+    lines = block.splitlines()
+    table_started = False
+    rows = []
+    current_id = None
+    current_lines = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # The header may occupy one line or several lines.
+        if not table_started and re.search(r"\bSTEP\s+ID\b", line, re.IGNORECASE):
+            table_started = True
+            continue
+
+        if not table_started:
+            continue
+
+        # MODE rows are not STEP rows and must never affect status.
+        if is_mode_line(line):
+            if current_id is not None:
+                rows.append((current_id, current_lines))
+                current_id = None
+                current_lines = []
+            continue
+
+        step_match = STEP_ID_RE.match(line)
+
+        if step_match:
+            if current_id is not None:
+                rows.append((current_id, current_lines))
+
+            current_id = step_match.group(1)
+            remainder = line[step_match.end():].strip()
+            current_lines = [remainder] if remainder else []
+
+        elif current_id is not None:
+            # Wrapped descriptions, timestamps, and status values belong
+            # to the current STEP until another STEP ID or MODE row appears.
+            current_lines.append(line)
+
+    if current_id is not None:
+        rows.append((current_id, current_lines))
+
+    seen_ids = set()
+
+    for step_id, row_lines in rows:
+        if step_id in seen_ids:
+            warnings.append(
+                "Duplicate STEP ID " + step_id +
+                " found within one procedure execution."
+            )
+        seen_ids.add(step_id)
+
+        step_status, description = parse_step_row(step_id, row_lines, warnings)
+        descriptions[step_id] = description
+
+        if step_status in STATUS_NAMES:
+            status[step_status].append(step_id)
+
+    return status, descriptions, warnings
+
+
+def parse_pdf_text(text, source_name="unknown PDF"):
+    executions = []
+    warnings = []
+
+    blocks = split_procedure_blocks(text)
+
+    if not blocks:
+        warnings.append(source_name + ": no Procedure: headers were detected.")
+
+    for index, block in enumerate(blocks, 1):
+        name, date_time, duration = extract_metadata(block)
+
+        if not name:
+            warnings.append(
+                source_name + ": execution " + str(index) + " has no procedure name."
+            )
+
+        if date_time is None:
+            warnings.append(
+                source_name + ": execution " + str(index) +
+                " has an unrecognized header timestamp."
+            )
+
+        if duration is None:
+            warnings.append(
+                source_name + ": execution " + str(index) +
+                " has an unrecognized duration."
+            )
+
+        status, descriptions, row_warnings = extract_steps(block)
+
+        for warning in row_warnings:
+            warnings.append(
+                source_name + " / execution " + str(index) + ": " + warning
+            )
+
+        if status["failure"]:
+            final_status = "Failure"
+            final_reason = []
+
+            for step_id in status["failure"]:
+                reason = descriptions.get(step_id, "")
+                final_reason.append({step_id: reason})
+
+                if not reason:
+                    warnings.append(
+                        source_name + ": failed STEP " + step_id +
+                        " has no extracted description."
+                    )
+        else:
+            final_status = "Success"
+            final_reason = "None"
+
+        executions.append({
+            "Procedure Name": name,
+            "date_time": date_time if date_time else "",
+            "Dur": duration if duration is not None else 0,
+            "Status": status,
+            "final_status": final_status,
+            "final_status_reason": final_reason
+        })
+
+    return executions, warnings
+
+
+def validate_execution(execution):
+    issues = []
+    status = execution.get("Status", {})
+
+    for name in STATUS_NAMES:
+        if name not in status or not isinstance(status[name], list):
+            issues.append("Status key '" + name + "' is missing or invalid.")
+
+    all_ids = []
+    for name in STATUS_NAMES:
+        all_ids.extend(status.get(name, []))
+
+    if len(all_ids) != len(set(all_ids)):
+        issues.append("A STEP ID appears more than once across status categories.")
+
+    if execution.get("final_status") not in ("Failure", "Success"):
+        issues.append("final_status must be Failure or Success.")
+
+    if status.get("failure") and execution.get("final_status") != "Failure":
+        issues.append("A failed STEP exists but final_status is not Failure.")
+
+    return issues
+    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Create main.py
+
+
+import os
+import sys
+import json
+import traceback
+from datetime import datetime
+
+import fitz
+
+from pdf_parser import (
+    parse_pdf_text,
+    normalize_procedure_name,
+    validate_execution
+)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+DIAGNOSTICS_DIR = os.path.join(BASE_DIR, "diagnostics")
+
+
+def get_page_count(document):
+    if hasattr(document, "pageCount"):
+        return document.pageCount
+    return document.page_count
+
+
+def load_page(document, page_index):
+    if hasattr(document, "loadPage"):
+        return document.loadPage(page_index)
+    return document.load_page(page_index)
+
+
+def get_page_text(page):
+    if hasattr(page, "getText"):
+        return page.getText("text")
+    return page.get_text("text")
+
+
+def prepare_folders():
+    for folder in (INPUT_DIR, OUTPUT_DIR, DIAGNOSTICS_DIR):
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+
+def write_diagnostic(lines):
+    path = os.path.join(DIAGNOSTICS_DIR, "diagnostic_report.txt")
+    with open(path, "w") as report:
+        report.write("\n".join(lines) + "\n")
+    return path
+
+
+def remove_previous_outputs():
+    removed = []
+
+    for filename in os.listdir(OUTPUT_DIR):
+        if filename.startswith("output_") and filename.lower().endswith(".json"):
+            path = os.path.join(OUTPUT_DIR, filename)
+            if os.path.isfile(path):
+                os.remove(path)
+                removed.append(filename)
+
+    return removed
+
+
+def read_pdf_text(pdf_path):
+    document = None
+
+    try:
+        document = fitz.open(pdf_path)
+        page_count = get_page_count(document)
+        text_parts = []
+
+        for page_index in range(page_count):
+            page = load_page(document, page_index)
+            text_parts.append(get_page_text(page))
+
+        return "\n".join(text_parts), page_count
+
+    finally:
+        if document is not None:
+            document.close()
+
+
+def main():
+    prepare_folders()
+
+    print("=" * 60)
+    print("PDF TO JSON DATASET CONVERTER")
+    print("=" * 60)
+    print("Python version:", sys.version.split()[0])
+    print("PyMuPDF version:", getattr(fitz, "VersionBind", "unknown"))
+    print("Project folder:", BASE_DIR)
+
+    diagnostics = [
+        "PDF-to-JSON diagnostic report",
+        "Run time: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Python version: " + sys.version.split()[0],
+        "PyMuPDF version: " + str(getattr(fitz, "VersionBind", "unknown")),
+        ""
+    ]
+
+    pdf_names = sorted([
+        filename for filename in os.listdir(INPUT_DIR)
+        if filename.lower().endswith(".pdf")
+        and os.path.isfile(os.path.join(INPUT_DIR, filename))
+    ])
+
+    print("PDF files found:", len(pdf_names))
+
+    if not pdf_names:
+        message = "ERROR: No PDF files found inside input/."
+        print(message)
+        diagnostics.append(message)
+        print("Diagnostic report:", write_diagnostic(diagnostics))
+        return
+
+    removed = remove_previous_outputs()
+    print("Previous output JSON files removed:", len(removed))
+    diagnostics.append("Previous output JSON files removed: " + str(len(removed)))
+
+    grouped = {}
+    total_pdfs_read = 0
+    total_pages_read = 0
+    total_executions = 0
+    total_step_ids = 0
+    warning_count = 0
+    failed_files = []
+
+    for filename in pdf_names:
+        pdf_path = os.path.join(INPUT_DIR, filename)
+        print("\nProcessing:", filename)
+        diagnostics.append("FILE: " + filename)
+
+        try:
+            full_text, page_count = read_pdf_text(pdf_path)
+            total_pdfs_read += 1
+            total_pages_read += page_count
+
+            print("  Pages read:", page_count)
+            print("  Extracted text characters:", len(full_text))
+            diagnostics.append("  Pages read: " + str(page_count))
+            diagnostics.append("  Extracted text characters: " + str(len(full_text)))
+
+            if not full_text.strip():
+                warning_count += 1
+                message = "WARNING: No selectable text extracted from " + filename
+                print(" ", message)
+                diagnostics.append(message)
+
+            executions, warnings = parse_pdf_text(full_text, filename)
+
+            print("  Procedure executions detected:", len(executions))
+            diagnostics.append(
+                "  Procedure executions detected: " + str(len(executions))
+            )
+
+            for warning in warnings:
+                warning_count += 1
+                print("  WARNING:", warning)
+                diagnostics.append("  WARNING: " + warning)
+
+            for execution in executions:
+                procedure_name = execution["Procedure Name"]
+                group_key = normalize_procedure_name(procedure_name)
+
+                if not group_key:
+                    warning_count += 1
+                    message = (
+                        "Empty procedure name in " + filename +
+                        "; execution skipped."
+                    )
+                    print("  WARNING:", message)
+                    diagnostics.append("  WARNING: " + message)
+                    continue
+
+                if group_key not in grouped:
+                    grouped[group_key] = {
+                        "Procedure Name": procedure_name,
+                        "procedures": []
+                    }
+
+                grouped[group_key]["procedures"].append({
+                    "date_time": execution["date_time"],
+                    "Dur": execution["Dur"],
+                    "Status": execution["Status"],
+                    "final_status": execution["final_status"],
+                    "final_status_reason": execution["final_status_reason"]
+                })
+
+                total_executions += 1
+
+                for status_name in ("success", "failure", "suspend", "progress"):
+                    total_step_ids += len(execution["Status"][status_name])
+
+                for issue in validate_execution(execution):
+                    warning_count += 1
+                    message = filename + " / " + procedure_name + ": " + issue
+                    print("  VALIDATION WARNING:", message)
+                    diagnostics.append("  VALIDATION WARNING: " + message)
+
+            diagnostics.append("")
+
+        except Exception as error:
+            failed_files.append(filename)
+            warning_count += 1
+            message = "ERROR processing " + filename + ": " + repr(error)
+            print(" ", message)
+            diagnostics.append(message)
+            diagnostics.append(traceback.format_exc())
+            diagnostics.append("")
+
+    output_data = list(grouped.values())
+    output_data.append({
+        "PDFInfo": {
+            "Total PDFs read": total_pdfs_read,
+            "Total Pages read": total_pages_read
+        }
+    })
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_filename = "output_" + timestamp + ".json"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        with open(output_path, "w") as output_file:
+            json.dump(output_data, output_file, indent=4, ensure_ascii=False)
+
+        with open(output_path, "r") as output_file:
+            json.load(output_file)
+
+    except Exception as error:
+        message = "FATAL: JSON write/verification failed: " + repr(error)
+        print(message)
+        diagnostics.append(message)
+        diagnostics.append(traceback.format_exc())
+        print("Diagnostic report:", write_diagnostic(diagnostics))
+        return
+
+    summary = [
+        "",
+        "RUN SUMMARY",
+        "PDFs read successfully: " + str(total_pdfs_read),
+        "Pages read: " + str(total_pages_read),
+        "Unique procedure-name groups: " + str(len(grouped)),
+        "Procedure executions added: " + str(total_executions),
+        "STEP IDs counted: " + str(total_step_ids),
+        "Warnings/errors: " + str(warning_count),
+        "Files with read errors: " +
+        (", ".join(failed_files) if failed_files else "None"),
+        "JSON output: " + output_path
+    ]
+
+    diagnostics.extend(summary)
+
+    print("\n" + "=" * 60)
+    for line in summary:
+        print(line)
+
+    print("JSON created and valid syntax:", output_path)
+    print("Diagnostic report:", write_diagnostic(diagnostics))
+    print("Compare the JSON with the source PDFs before relying on it.")
+
+
+if __name__ == "__main__":
+    main()
+    
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Create tests/test_parser.py
+ 
+ 
+ 
+import unittest
+
+from pdf_parser import (
+    normalize_procedure_name,
+    normalize_datetime,
+    parse_pdf_text
+)
+
+
+class ParserTests(unittest.TestCase):
+
+    def test_procedure_name_grouping(self):
+        self.assertEqual(
+            normalize_procedure_name(" notes "),
+            normalize_procedure_name("NOTES")
+        )
+        self.assertNotEqual(
+            normalize_procedure_name("notes"),
+            normalize_procedure_name("notes1")
+        )
+
+    def test_datetime_conversion(self):
+        self.assertEqual(
+            normalize_datetime("31-Dec-2025 11:44:33:256"),
+            "2025-12-31 11:44:33.256"
+        )
+
+    def test_duration_status_and_failure_reason(self):
+        sample = """Procedure: notes
+Time: 31-Dec-2025 11:44:33:256
+Mode: Usual
+Source: example
+Dur: 203.96(s)
+Priority: Low
+
+STEP ID STEP TIME STATUS
+01.001 description contains Failure words 31-Dec-2025 12:44:33:226 Success
+01.002 actual failed description 31-Dec-2025 10:45:31:246 Failure
+"""
+
+        executions, warnings = parse_pdf_text(sample, "test.pdf")
+
+        self.assertEqual(len(executions), 1)
+        execution = executions[0]
+
+        self.assertEqual(execution["Procedure Name"], "notes")
+        self.assertEqual(
+            execution["date_time"],
+            "2025-12-31 11:44:33.256"
+        )
+        self.assertEqual(execution["Dur"], 203)
+        self.assertEqual(execution["Status"]["success"], ["01.001"])
+        self.assertEqual(execution["Status"]["failure"], ["01.002"])
+        self.assertEqual(execution["Status"]["suspend"], [])
+        self.assertEqual(execution["Status"]["progress"], [])
+        self.assertEqual(execution["final_status"], "Failure")
+        self.assertEqual(
+            execution["final_status_reason"],
+            [{"01.002": "actual failed description"}]
+        )
+
+    def test_wrapped_step_and_mode_row(self):
+        sample = """Procedure: notes
+Time: 31-Dec-2025 11:44:33:256
+Dur: 10.99(s)
+
+STEP ID STEP
+TIME
+STATUS
+01.001 description line one
+description line two
+31-Dec-2025 12:44:33:226
+Success
+MODE AUTO
+99.999 This is not a real STEP row
+Failure
+01.002 another description
+31-Dec-2025 12:45:33:226
+Failure
+"""
+
+        executions, warnings = parse_pdf_text(sample, "test.pdf")
+        execution = executions[0]
+
+        self.assertEqual(execution["Status"]["success"], ["01.001"])
+        self.assertEqual(execution["Status"]["failure"], ["01.002"])
+        self.assertNotIn("99.999", execution["Status"]["failure"])
+        self.assertEqual(execution["final_status"], "Failure")
+        self.assertEqual(
+            execution["final_status_reason"],
+            [{"01.002": "another description"}]
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
+    
+  ---------------------------------------------------------------------------------------------------------------------------------
+  
+  
+  AND NOW ABT THE CHASNGE AND THIS ONE CHANGE IS DONE NOW TILL NOW THIS IS THE CHANGE IN THE CODE TILL NOW AND AFTERWARDS ALSO THERE CAN BE THERE AND AT THAT TIME I WILL GIVE THEM  
+
+Step 1 — Replace your entire parse_step_row() function
+
+Open pdf_parser.py. Replace only the existing parse_step_row() function with the code below. Do not change any other function yet.
+
+
+def parse_step_row(step_id, row_lines, warnings):
+    description_parts = []
+    found_status = None
+
+    for raw_line in row_lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # Ignore MODE rows.
+        if is_mode_line(line):
+            continue
+
+        # Ignore separator lines such as ----- or ______.
+        if re.match(r"^[\s\-_=*|]+$", line):
+            continue
+
+        # A status on its own line.
+        status_match = STATUS_RE.match(line)
+        if status_match:
+            found_status = status_match.group(1).lower()
+            continue
+
+        # Detect a status at the end of a line.
+        suffix_match = re.search(
+            r"\b(Success|Failure|Suspend|Progress)\s*$",
+            line,
+            re.IGNORECASE
+        )
+
+        has_date_or_time = bool(
+            DATE_RE.search(line) or TIME_RE.search(line)
+        )
+
+        if suffix_match and has_date_or_time:
+            found_status = suffix_match.group(1).lower()
+            line = line[:suffix_match.start()].strip()
+
+        # Remove timestamps and dates.
+        cleaned = remove_date_time(line)
+
+        # Remove a repeated STEP ID if present.
+        cleaned = STEP_ID_RE.sub("", cleaned).strip()
+
+        if cleaned:
+            description_parts.append(cleaned)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+
+    if found_status is None:
+        warnings.append(
+            "STEP " + step_id +
+            " has no confidently detected status; "
+            "it was not added to a status list."
+        )
+
+    return found_status, description
+    
+    
+---------------------------------------------------------------------------------------------------------------------------------------------
+then the next change we have done is this below and this is the latest --
+
+Replace parse_step_row() first
+
+In pdf_parser.py, replace the entire existing parse_step_row() function with this version. Leave extract_steps() unchanged for now.
+
+
+def parse_step_row(step_id, row_lines, warnings):
+    description_parts = []
+    found_status = None
+    description_finished = False
+
+    for raw_line in row_lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # Ignore MODE rows and separator lines.
+        if is_mode_line(line):
+            continue
+
+        if re.match(r"^[\s\-_=*|]+$", line):
+            continue
+
+        # Detect status on its own line.
+        status_match = STATUS_RE.match(line)
+        if status_match:
+            found_status = status_match.group(1).lower()
+            continue
+
+        # Detect a status at the end of a line.
+        suffix_match = re.search(
+            r"\b(Success|Failure|Suspend|Progress)\s*$",
+            line,
+            re.IGNORECASE
+        )
+
+        has_date_or_time = bool(
+            DATE_RE.search(line) or TIME_RE.search(line)
+        )
+
+        if suffix_match and has_date_or_time:
+            found_status = suffix_match.group(1).lower()
+            line = line[:suffix_match.start()].strip()
+
+        # Once the timestamp is reached, later continuation lines
+        # are extra details, not part of the short STEP description.
+        if description_finished:
+            continue
+
+        date_match = DATE_RE.search(line)
+        time_match = TIME_RE.search(line)
+
+        positions = []
+        if date_match:
+            positions.append(date_match.start())
+        if time_match:
+            positions.append(time_match.start())
+
+        if positions:
+            line = line[:min(positions)].strip()
+            description_finished = True
+
+        # Remove a repeated STEP ID if present.
+        cleaned = STEP_ID_RE.sub("", line).strip()
+
+        if cleaned:
+            description_parts.append(cleaned)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+
+    if found_status is None:
+        warnings.append(
+            "STEP " + step_id +
+            " has no confidently detected status; "
+            "it was not added to a status list."
+        )
+
+    return found_status, description
+
+This version uses the first date or time as the boundary for the short description. It can still detect a status on a later standalone line, while ignoring extra text after that boundary.
+
+Important limitation: This assumes the timestamp marks the end of the description in your actual PDF. If your PDF sometimes wraps the short description onto another line before the timestamp, we'll need to account for that layout separately.
+
+2. Run the tests again
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+then next we did this 0----
+
+You're right. I gave you two different instructions, which made this confusing. Sorry. Let's make it clear: we will change only one line in pdf_parser.py right now. Do not change the MODE section.
+
+Step 1 — Open pdf_parser.py
+
+Find this line near the top of the file:
+
+STEP_ID_RE = re.compile(r"^\s*(\d{2}\.\d{3,4})\b")
+Step 2 — Replace that one line
+
+Delete the old line and put this in its place:
+
+STEP_ID_RE = re.compile(r"^\s*(?!99\.999\b)(\d{2}\.\d{3,4})\b")
+
+This specifically excludes 99.999 while preserving other IDs that match your existing pattern, such as 01.001 and 01.002.
+
+Leave everything else unchanged, including:
+
+parse_step_row()
+
+extract_steps()
+
+The MODE section
+
+main.py and test_parser.py
+
+Step 3 — Save and test
+
+Press Ctrl + S.
+
+Open the PyCharm Terminal.
+
+Run:
+
+python -m unittest discover -s tests -v
+Step 4 — Tell me the result
+
+Send me the output from the terminal.
+
+and then we got the output as this ---
+Ran 4 tests in 0.000s
+
+OK
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+AND THIS BELOW THING IS JUST FOR REFERENCE THAT IS LIKE THIS IS THER FINASL CHANGE WE DONE FOR THAT FUNCTION AND THEN THE AFTER THIS THE ABOVE ONE ONE LINE CHANGE WAS DONE --
+
+1. Replace parse_step_row() first
+
+In pdf_parser.py, replace the entire existing parse_step_row() function with this version. Leave extract_steps() unchanged for now.
+
+
+def parse_step_row(step_id, row_lines, warnings):
+    description_parts = []
+    found_status = None
+    description_finished = False
+
+    for raw_line in row_lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # Ignore MODE rows and separator lines.
+        if is_mode_line(line):
+            continue
+
+        if re.match(r"^[\s\-_=*|]+$", line):
+            continue
+
+        # Detect status on its own line.
+        status_match = STATUS_RE.match(line)
+        if status_match:
+            found_status = status_match.group(1).lower()
+            continue
+
+        # Detect a status at the end of a line.
+        suffix_match = re.search(
+            r"\b(Success|Failure|Suspend|Progress)\s*$",
+            line,
+            re.IGNORECASE
+        )
+
+        has_date_or_time = bool(
+            DATE_RE.search(line) or TIME_RE.search(line)
+        )
+
+        if suffix_match and has_date_or_time:
+            found_status = suffix_match.group(1).lower()
+            line = line[:suffix_match.start()].strip()
+
+        # Once the timestamp is reached, later continuation lines
+        # are extra details, not part of the short STEP description.
+        if description_finished:
+            continue
+
+        date_match = DATE_RE.search(line)
+        time_match = TIME_RE.search(line)
+
+        positions = []
+        if date_match:
+            positions.append(date_match.start())
+        if time_match:
+            positions.append(time_match.start())
+
+        if positions:
+            line = line[:min(positions)].strip()
+            description_finished = True
+
+        # Remove a repeated STEP ID if present.
+        cleaned = STEP_ID_RE.sub("", line).strip()
+
+        if cleaned:
+            description_parts.append(cleaned)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+
+    if found_status is None:
+        warnings.append(
+            "STEP " + step_id +
+            " has no confidently detected status; "
+            "it was not added to a status list."
+        )
+
+    return found_status, description
+
+This version uses the first date or time as the boundary for the short description. It can still detect a status on a later standalone line, while ignoring extra text after that boundary.
+
+Important limitation: This assumes the timestamp marks the end of the description in your actual PDF. If your PDF sometimes wraps the short description onto another line before the timestamp, we'll need to account for that layout separately.
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+final structure we want is this ----
+
+{
+    "notes": {
+        "procedures": [
+            {
+                "date_time": "2025-12-31 11:44:33.256",
+                "Dur": 203,
+                "Status": {
+                    "success": ["01.001"],
+                    "failure": ["01.002"],
+                    "suspend": [],
+                    "progress": []
+                },
+                "final_status": "Failure",
+                "final_status_reason": [
+                    {
+                        "01.002": "CHECK THIS"
+                    }
+                ]
+            }
+        ]
+    },
+    "sample": {
+        "procedures": [
+            {
+                "date_time": "2025-12-31 14:20:11.250",
+                "Dur": 42,
+                "Status": {
+                    "success": ["01.001"],
+                    "failure": [],
+                    "suspend": [],
+                    "progress": []
+                },
+                "final_status": "Success",
+                "final_status_reason": "None"
+            }
+        ]
+    },
+    "PDFInfo": {
+        "Total PDFs read": 2,
+        "PDF names": [
+            "file1.pdf",
+            "file2.pdf"
+        ],
+        "Total Pages read": 700
+    }
+}
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+THEN THE NEXT CHANGE WE DID WAS THIS ------
+
+
+
+Step — Replace the code in main.py
+
+Your current code has two things we need to change:
+
+It groups procedure names using a normalized, lowercase key, so notes and NOTES would be treated as the same procedure.
+
+It creates a list at the top level and appends PDFInfo as another list item. We need a JSON object with procedure names as keys and PDFInfo as a separate key.
+
+What to do
+
+Open main.py.
+
+Select all its existing code.
+
+Delete it.
+
+Copy the complete replacement code below into main.py.
+
+Save the file.
+
+
+
+
+
+
+
+
+```python
+import os
+import sys
+import json
+import traceback
+from datetime import datetime
+
+import fitz
+
+from pdf_parser import (
+    parse_pdf_text,
+    validate_execution
+)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+DIAGNOSTICS_DIR = os.path.join(BASE_DIR, "diagnostics")
+
+
+def get_page_count(document):
+    if hasattr(document, "pageCount"):
+        return document.pageCount
+    return document.page_count
+
+
+def load_page(document, page_index):
+    if hasattr(document, "loadPage"):
+        return document.loadPage(page_index)
+    return document.load_page(page_index)
+
+
+def get_page_text(page):
+    if hasattr(page, "getText"):
+        return page.getText("text")
+    return page.get_text("text")
+
+
+def prepare_folders():
+    for folder in (INPUT_DIR, OUTPUT_DIR, DIAGNOSTICS_DIR):
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+
+def write_diagnostic(lines):
+    path = os.path.join(DIAGNOSTICS_DIR, "diagnostic_report.txt")
+    with open(path, "w") as report:
+        report.write("\n".join(lines) + "\n")
+    return path
+
+
+def remove_previous_outputs():
+    removed = []
+
+    for filename in os.listdir(OUTPUT_DIR):
+        if filename.startswith("output_") and filename.lower().endswith(".json"):
+            path = os.path.join(OUTPUT_DIR, filename)
+            if os.path.isfile(path):
+                os.remove(path)
+                removed.append(filename)
+
+    return removed
+
+
+def read_pdf_text(pdf_path):
+    document = None
+
+    try:
+        document = fitz.open(pdf_path)
+        page_count = get_page_count(document)
+        text_parts = []
+
+        for page_index in range(page_count):
+            page = load_page(document, page_index)
+            text_parts.append(get_page_text(page))
+
+        return "\n".join(text_parts), page_count
+
+    finally:
+        if document is not None:
+            document.close()
+
+
+def main():
+    prepare_folders()
+
+    print("=" * 60)
+    print("PDF TO JSON DATASET CONVERTER")
+    print("=" * 60)
+    print("Python version:", sys.version.split()[0])
+    print("PyMuPDF version:", getattr(fitz, "VersionBind", "unknown"))
+    print("Project folder:", BASE_DIR)
+
+    diagnostics = [
+        "PDF-to-JSON diagnostic report",
+        "Run time: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Python version: " + sys.version.split()[0],
+        "PyMuPDF version: " + str(getattr(fitz, "VersionBind", "unknown")),
+        ""
+    ]
+
+    pdf_names = sorted([
+        filename for filename in os.listdir(INPUT_DIR)
+        if filename.lower().endswith(".pdf")
+        and os.path.isfile(os.path.join(INPUT_DIR, filename))
+    ])
+
+    print("PDF files found:", len(pdf_names))
+
+    if not pdf_names:
+        message = "ERROR: No PDF files found inside input/."
+        print(message)
+        diagnostics.append(message)
+        print("Diagnostic report:", write_diagnostic(diagnostics))
+        return
+
+    removed = remove_previous_outputs()
+    print("Previous output JSON files removed:", len(removed))
+    diagnostics.append("Previous output JSON files removed: " + str(len(removed)))
+
+    # Exact procedure name is the dictionary key.
+    # No lowercasing or case normalization is performed.
+    grouped = {}
+
+    total_pdfs_read = 0
+    total_pages_read = 0
+    total_executions = 0
+    total_step_ids = 0
+    warning_count = 0
+    failed_files = []
+
+    for filename in pdf_names:
+        pdf_path = os.path.join(INPUT_DIR, filename)
+        print("\nProcessing:", filename)
+        diagnostics.append("FILE: " + filename)
+
+        try:
+            full_text, page_count = read_pdf_text(pdf_path)
+
+            total_pdfs_read += 1
+            total_pages_read += page_count
+
+            print("  Pages read:", page_count)
+            print("  Extracted text characters:", len(full_text))
+
+            diagnostics.append("  Pages read: " + str(page_count))
+            diagnostics.append(
+                "  Extracted text characters: " + str(len(full_text))
+            )
+
+            if not full_text.strip():
+                warning_count += 1
+                message = "WARNING: No selectable text extracted from " + filename
+                print(" ", message)
+                diagnostics.append(message)
+
+            executions, warnings = parse_pdf_text(full_text, filename)
+
+            print("  Procedure executions detected:", len(executions))
+            diagnostics.append(
+                "  Procedure executions detected: " + str(len(executions))
+            )
+
+            for warning in warnings:
+                warning_count += 1
+                print("  WARNING:", warning)
+                diagnostics.append("  WARNING: " + warning)
+
+            for execution in executions:
+                procedure_name = execution["Procedure Name"]
+
+                # Preserve the exact extracted name. Only reject an empty
+                # or whitespace-only name; do not change its capitalization.
+                if not procedure_name or not procedure_name.strip():
+                    warning_count += 1
+                    message = (
+                        "Empty procedure name in " + filename +
+                        "; execution skipped."
+                    )
+                    print("  WARNING:", message)
+                    diagnostics.append("  WARNING: " + message)
+                    continue
+
+                if procedure_name not in grouped:
+                    grouped[procedure_name] = {
+                        "procedures": []
+                    }
+
+                grouped[procedure_name]["procedures"].append({
+                    "date_time": execution["date_time"],
+                    "Dur": execution["Dur"],
+                    "Status": execution["Status"],
+                    "final_status": execution["final_status"],
+                    "final_status_reason": execution["final_status_reason"]
+                })
+
+                total_executions += 1
+
+                for status_name in (
+                    "success", "failure", "suspend", "progress"
+                ):
+                    total_step_ids += len(
+                        execution["Status"].get(status_name, [])
+                    )
+
+                for issue in validate_execution(execution):
+                    warning_count += 1
+                    message = (
+                        filename + " / " + procedure_name + ": " + issue
+                    )
+                    print("  VALIDATION WARNING:", message)
+                    diagnostics.append("  VALIDATION WARNING: " + message)
+
+            diagnostics.append("")
+
+        except Exception as error:
+            failed_files.append(filename)
+            warning_count += 1
+            message = "ERROR processing " + filename + ": " + repr(error)
+
+            print(" ", message)
+            diagnostics.append(message)
+            diagnostics.append(traceback.format_exc())
+            diagnostics.append("")
+
+    # The final JSON is a dictionary, not a list.
+    # Procedure names are top-level keys and PDFInfo is separate.
+    output_data = {}
+
+    for procedure_name, procedure_data in grouped.items():
+        output_data[procedure_name] = procedure_data
+
+    output_data["PDFInfo"] = {
+        "Total PDFs read": total_pdfs_read,
+        "PDF names": pdf_names,
+        "Total Pages read": total_pages_read
+    }
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_filename = "output_" + timestamp + ".json"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        with open(output_path, "w") as output_file:
+            json.dump(
+                output_data,
+                output_file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+        # Confirm that the generated file is valid JSON.
+        with open(output_path, "r") as output_file:
+            json.load(output_file)
+
+    except Exception as error:
+        message = "FATAL: JSON write/verification failed: " + repr(error)
+        print(message)
+        diagnostics.append(message)
+        diagnostics.append(traceback.format_exc())
+        print("Diagnostic report:", write_diagnostic(diagnostics))
+        return
+
+    summary = [
+        "",
+        "RUN SUMMARY",
+        "PDFs read successfully: " + str(total_pdfs_read),
+        "Pages read: " + str(total_pages_read),
+        "Unique procedure-name groups: " + str(len(grouped)),
+        "Procedure executions added: " + str(total_executions),
+        "STEP IDs counted: " + str(total_step_ids),
+        "Warnings/errors: " + str(warning_count),
+        "Files with read errors: " +
+        (", ".join(failed_files) if failed_files else "None"),
+        "JSON output: " + output_path
+    ]
+
+    diagnostics.extend(summary)
+
+    print("\n" + "=" * 60)
+
+    for line in summary:
+        print(line)
+
+    print("JSON created and valid syntax:", output_path)
+    print("Diagnostic report:", write_diagnostic(diagnostics))
+    print("Compare the JSON with the source PDFs before relying on it.")
+
+
+if __name__ == "__main__":
+    main()
+-------------------------------------------------------------------------------------------------------------------------------------------------
+
+
