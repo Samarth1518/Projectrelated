@@ -1,0 +1,1136 @@
+# TODAY'S FULL SUMMARY — PDF TO JSON PROJECT
+
+## 1. Project overview
+
+The project is named `PDF_to_JSON`.
+
+The purpose is to read one or more PDFs, extract procedure executions and their STEP details, group executions by their exact procedure names, and generate one combined JSON output.
+
+The project uses:
+
+* Python
+* PyMuPDF (`fitz`) to read PDFs
+* Regular expressions to parse procedure metadata, STEP IDs, dates, times, and statuses
+* `unittest` for automated tests
+
+## 2. Current folder structure
+
+```text
+PDF_to_JSON/
+│
+├── main.py
+├── pdf_parser.py
+├── pdf_parser_backup.py
+│
+├── input/
+│   └── PDF files to process
+│
+├── output/
+│   └── Generated JSON files
+│
+├── diagnostics/
+│   └── diagnostic_report.txt
+│
+└── tests/
+    └── test_parser.py
+```
+
+The backup should remain unchanged. It is intended to preserve the previous parser version in case the current changes need to be reverted.
+
+## 3. Main functionality already implemented
+
+### PDF reading
+
+* `main.py` uses `fitz.open()` to open PDFs.
+* It extracts text from each page.
+* It counts the number of PDFs read and the total pages read.
+* It records diagnostic information and errors.
+
+### Procedure grouping
+
+* Procedure names are used as exact top-level JSON keys.
+* Repeated executions with the same exact procedure name are grouped under one `procedures` array.
+* Names with different capitalization are treated as different names.
+* Executions from multiple PDFs can be grouped together in the same output.
+
+### JSON output
+
+The intended structure is:
+
+```json
+{
+    "notes": {
+        "procedures": [
+            {
+                "date_time": "2025-12-31 11:44:33.256",
+                "Dur": 203,
+                "Status": {
+                    "success": ["01.001"],
+                    "failure": ["01.002"],
+                    "suspend": [],
+                    "progress": []
+                },
+                "final_status": "Failure",
+                "final_status_reason": [
+                    {
+                        "01.002": "CHECK THIS"
+                    }
+                ]
+            }
+        ]
+    },
+    "PDFInfo": {
+        "Total PDFs read": 2,
+        "PDF names": [
+            "file1.pdf",
+            "file2.pdf"
+        ],
+        "Total Pages read": 700
+    }
+}
+```
+
+The values above are illustrative, not the results of today's latest run.
+
+### Metadata key
+
+The earlier concern about `PDFInfo` conflicting with a procedure name was discussed. The selected replacement name was `Insights`, with the intention of using `Insights1`, `Insights2`, and so on if a key collision occurs.
+
+**Important:** The latest `main.py` code pasted in this conversation still uses `"PDFInfo"` directly. The collision-safe `Insights` change has not been shown in that latest `main.py` version. This should be checked before considering the metadata rename complete.
+
+## 4. Current `pdf_parser.py` behaviour
+
+The parser contains the following functions:
+
+* `normalize_procedure_name()`
+* `normalize_datetime()`
+* `split_procedure_blocks()`
+* `extract_metadata()`
+* `remove_date_time()`
+* `is_mode_line()`
+* `parse_step_row()`
+* `extract_steps()`
+* `parse_pdf_text()`
+* `validate_execution()`
+
+### Date and time
+
+The parser converts supported date/time values into a normalized format, for example:
+
+`31-Dec-2025 11:44:33:256`
+
+becomes:
+
+`2025-12-31 11:44:33.256`
+
+### Status detection
+
+The parser recognizes:
+
+* `Success`
+* `Failure`
+* `Suspend`
+* `Progress`
+
+These are stored in four arrays under `Status`.
+
+### STEP ID handling
+
+The current regular expression excludes `99.999`:
+
+```python
+STEP_ID_RE = re.compile(
+    r"^\s*(?!99\.999\b)(\d{2}\.\d{3,4})\b"
+)
+```
+
+This preserves supported IDs such as `01.001` and `01.002`.
+
+However, the exclusion currently prevents `99.999` from being recognized as a STEP ID. It does not explicitly skip the whole `99.999` row. That could allow its text to be mistakenly attached to the previous STEP. This is a known issue to address.
+
+### Failure reasons
+
+When at least one STEP has a failure status:
+
+* `final_status` is set to `"Failure"`.
+* `final_status_reason` becomes a list of dictionaries mapping failed STEP IDs to descriptions.
+
+When there are no failed STEP IDs:
+
+* `final_status` is set to `"Success"`.
+* `final_status_reason` is `"None"`.
+
+The desired improvement is to append explanatory text to the short description of a failed STEP without including unrelated content or the next STEP's data.
+
+## 5. Changes made to `parse_step_row()`
+
+Several versions of `parse_step_row()` were discussed and tried.
+
+The latest complete version shared in this conversation has:
+
+* `description_parts`
+* `additional_failure_parts`
+* `found_status`
+* `description_finished`
+
+Its intended behaviour is to:
+
+1. Collect the short STEP description before the timestamp.
+2. Collect possible explanatory text after the timestamp.
+3. Append the additional text only if the detected status is `failure`.
+4. Ignore `MODE` lines and separator lines.
+5. Detect statuses either on a separate line or at the end of a timestamp-containing line.
+
+The function is not yet extracting the additional explanation consistently.
+
+## 6. Latest testing results
+
+The latest reported results were:
+
+* All four existing unit tests completed successfully.
+* The program generated the JSON output file.
+* The parser was able to extract procedure data.
+* The new failure-reason feature was inconsistent.
+
+The user observed that:
+
+* Sometimes the additional explanation was captured fully.
+* Sometimes the next line or unrelated content was captured.
+* Most of the time, only the short STEP description was captured.
+* Full extraction was observed only occasionally.
+
+Therefore, passing the existing four tests does not mean the new failure-reason feature is fully correct.
+
+## 7. Main issue identified
+
+The current parser needs a more reliable way to distinguish:
+
+* The short STEP description.
+* The timestamp and status fields.
+* Additional explanatory text belonging to a failed STEP.
+* The next STEP's description.
+* `MODE` rows, separators, and unrelated table content.
+
+One known issue is that the current `parse_step_row()` logic may discard text after a timestamp on the same line because it slices the line at the timestamp and continues to the next iteration.
+
+Another issue is that `extract_steps()` relies on STEP IDs at the beginning of extracted lines to determine row boundaries. If the PDF's text extraction produces a different layout, the boundary detection may be unreliable.
+
+We need to address both issues without breaking the existing functionality.
+
+## 8. Example of the required failure-reason behaviour
+
+Example source:
+
+```text
+01.004     CHECK THIS      12-Dec-2024 11:33:44:456        Failure
+-------------------------------------------------------------------------------------------
+            WE HAVE CHECKED THIS PROPERLY
+-------------------------------------------------------------------------------------------
+01.005     CHECK ANOTHER      13-Dec-2024 10:32:14:556        Success
+```
+
+Expected failure reason:
+
+```json
+[
+    {
+        "01.004": "CHECK THIS, WE HAVE CHECKED THIS PROPERLY"
+    }
+]
+```
+
+The parser must:
+
+* Include the original failed STEP description.
+* Include the explanatory text belonging to that failed STEP.
+* Support explanations that span multiple lines.
+* Stop before the next STEP ID.
+* Exclude the next STEP's description and status.
+* Ignore `MODE` rows and separator lines.
+* Avoid appending explanatory text to successful steps.
+* Preserve the four status arrays and the other execution fields.
+
+This is the target behaviour, not a guarantee that the current parser achieves it.
+
+## 9. Current `main.py` state
+
+The latest complete `main.py` pasted in the conversation:
+
+* Reads PDFs using PyMuPDF.
+* Counts pages and PDFs.
+* Groups procedure executions by exact procedure name.
+* Creates the final JSON as a dictionary.
+* Adds `PDFInfo` metadata.
+* Writes diagnostic reports.
+* Deletes previous `output_*.json` files before processing.
+* Validates the JSON after writing it.
+* Runs execution validation and reports warnings.
+
+The current failure-reason issue is primarily in `pdf_parser.py`. `main.py` should not be changed unnecessarily while fixing the parser.
+
+**Important:** Since previous output files are deleted when the program starts, preserve a copy of any output JSON that needs to be compared.
+
+## 10. Current `tests/test_parser.py` state
+
+The four existing tests cover:
+
+1. Procedure-name normalization.
+2. Date/time conversion.
+3. Duration, status detection, and a basic failure reason.
+4. Wrapped STEP descriptions, `MODE` rows, and STEP ID handling.
+
+All four passed in the latest run.
+
+The test suite still needs additional cases for the new failure-reason behaviour.
+
+Recommended new test cases:
+
+* Explanation after a timestamp on the same line.
+* Explanation on one separate line.
+* Explanation across multiple lines.
+* Timestamp and status on separate lines.
+* Separator lines between the failure row and its explanation.
+* Next STEP immediately after the explanation.
+* A `MODE` row.
+* A `99.999` row between a failure and the next real STEP.
+* A successful STEP that must not receive an appended failure explanation.
+
+## 11. What has NOT been verified
+
+The actual PDF was not available during the latest review.
+
+Therefore:
+
+* The parser has not been validated against the actual source layout for the problematic examples.
+* The new multiline failure-reason behaviour is not yet reliable.
+* Passing the four existing tests does not establish full extraction accuracy.
+* The proposed fixes have not yet been implemented or tested.
+
+Do not claim that the failure-reason extraction is fully correct until it has been verified against realistic test cases and, when available, an actual PDF.
+
+## 12. Next steps
+
+When continuing the project:
+
+1. Keep `pdf_parser_backup.py` unchanged.
+
+2. Use the latest `pdf_parser.py` pasted in this conversation as the current reference.
+
+3. Fix the handling of explanatory text after timestamps, including text on the same line.
+
+4. Improve STEP boundary detection and explicitly skip the entire `99.999` row.
+
+5. Add tests for the different text layouts listed above.
+
+6. Run the complete unit test suite:
+
+   ```bash
+   python -m unittest discover -s tests -v
+   ```
+
+7. If tests pass, run the program against a small PDF with a known failure.
+
+8. Compare the generated JSON with the source PDF.
+
+9. Only after the small-PDF checks pass, run the larger PDF again.
+
+10. Preserve previous output JSON files before running because `main.py` deletes previous `output_*.json` files at startup.
+
+## 13. Instructions for continuing this project
+
+Continue from the current project state. Do not restart the project or recreate all files unnecessarily.
+
+The four existing tests pass, and the JSON generation works. The next task is specifically to improve the failure-reason extraction and test it carefully while preserving the working functionality.
+
+The user does not currently have the PDF available, so begin with realistic synthetic test cases based on the layouts already discussed. Request actual extracted text or the PDF later if needed to resolve layout-specific problems.
+
+Also revisit the `Insights` metadata-key change, because the latest pasted `main.py` still uses `PDFInfo`.
+
+**End of today's summary.**
+
+
+AND FOR THE CODE REFER BELOW 
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+THE BELOW ARE THE CHANGES THAT WE DID IN THE CODE SO THIS IS ALSO FOR YOUR REFERENCE ALONG WITH SUMMARY AND AFTER EACH STEPS WHATEVER WE DID THERE WILL BE A LINE THAT REFERS THAT THAT ONE STEP IS DONE AND AFTER THAT ANOTHER THING IS DONE OKAY THE LINE LIKE THIS ////////////////////////////////////////////////////////////////////////
+
+Today's first task: Replace PDFInfo with Insights
+Step 1 — Open main.py
+
+Find the existing metadata block that looks like this:
+
+output_data["PDFInfo"] = {
+    "Total PDFs read": total_pdfs_read,
+    "PDF names": pdf_names,
+    "Total Pages read": total_pages_read
+}
+Step 2 — Replace only that block
+
+Use this code instead:
+
+insights_key = "Insights"
+counter = 1
+
+while insights_key in output_data:
+    insights_key = "Insights" + str(counter)
+    counter += 1
+
+output_data[insights_key] = {
+    "Total PDFs read": total_pdfs_read,
+    "PDF names": pdf_names,
+    "Total Pages read": total_pages_read
+}
+
+This preserves the metadata fields and chooses Insights1, Insights2, and so on if the candidate key is already used by a procedure.
+
+Step 3 — Save and test
+
+Save main.py.
+
+Run your four existing unit tests:
+
+python -m unittest discover -s tests -v
+
+If they pass, run main.py with a small PDF.
+
+Check that the generated JSON contains the correct metadata and that no procedure data is lost.
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+NEXT CHANGE->
+
+There is one important distinction: your latest documented parse_step_row() stops collecting the description at the timestamp. I've adjusted that function below to preserve the short STEP description and additionally collect explanatory text for failed steps until the next STEP ID. The rest of the parser retains your existing logic.
+
+Step 1 — Replace the complete pdf_parser.py
+
+Open PDF_to_JSON/pdf_parser.py, select all its contents, and replace them with the following code.
+
+code -->
+
+
+import re
+from datetime import datetime
+
+STATUS_NAMES = ("success", "failure", "suspend", "progress")
+
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+# Exclude 99.999 while preserving the other supported STEP IDs.
+STEP_ID_RE = re.compile(
+    r"^\s*(?!99\.999\b)(\d{2}\.\d{3,4})\b"
+)
+
+DATE_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[-/]([A-Za-z]{3}|\d{1,2})[-/](\d{4})"
+    r"\s+(\d{1,2}):(\d{2}):(\d{2})[:.](\d{1,3})(?!\d)",
+    re.IGNORECASE
+)
+
+DATE_RE = re.compile(
+    r"(?<!\d)\d{1,2}[-/](?:[A-Za-z]{3}|\d{1,2})[-/]\d{4}(?!\d)",
+    re.IGNORECASE
+)
+
+TIME_RE = re.compile(
+    r"(?<!\d)\d{1,2}:\d{2}:\d{2}[:.]\d{1,3}(?!\d)"
+)
+
+DURATION_RE = re.compile(
+    r"\bDur\s*:\s*(\d+(?:\.\d+)?)\s*\(s\)",
+    re.IGNORECASE
+)
+
+STATUS_RE = re.compile(
+    r"^(Success|Failure|Suspend|Progress)$",
+    re.IGNORECASE
+)
+
+
+def normalize_procedure_name(name):
+    # Retained for compatibility with existing code and tests.
+    # main.py uses the exact extracted procedure name as its key.
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def normalize_datetime(value):
+    match = DATE_TIME_RE.search(value or "")
+
+    if not match:
+        return None
+
+    day, month_text, year, hour, minute, second, millis = (
+        match.groups()
+    )
+
+    if month_text.isdigit():
+        month = int(month_text)
+    else:
+        month = MONTHS.get(month_text.lower()[:3])
+
+    if not month or not 1 <= month <= 12:
+        return None
+
+    try:
+        parsed = datetime(
+            int(year),
+            month,
+            int(day),
+            int(hour),
+            int(minute),
+            int(second)
+        )
+    except ValueError:
+        return None
+
+    millis = millis[:3].ljust(3, "0")
+
+    return (
+        parsed.strftime("%Y-%m-%d %H:%M:%S")
+        + "."
+        + millis
+    )
+
+
+def split_procedure_blocks(text):
+    matches = list(
+        re.finditer(r"\bProcedure\s*:", text, re.IGNORECASE)
+    )
+
+    blocks = []
+
+    for index, match in enumerate(matches):
+        start = match.start()
+
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+
+        blocks.append(text[start:end])
+
+    return blocks
+
+
+def extract_metadata(block):
+    name_match = re.search(
+        r"\bProcedure\s*:\s*(.*?)\s+\bTime\s*:",
+        block,
+        re.IGNORECASE | re.DOTALL
+    )
+
+    name = ""
+
+    if name_match:
+        name = re.sub(
+            r"\s+", " ", name_match.group(1)
+        ).strip()
+
+    # Procedure metadata is extracted only from the header,
+    # before the STEP table.
+    table_match = re.search(
+        r"\bSTEP\s+ID\b", block, re.IGNORECASE
+    )
+
+    header = (
+        block[:table_match.start()]
+        if table_match
+        else block
+    )
+
+    time_match = DATE_TIME_RE.search(header)
+
+    date_time = (
+        normalize_datetime(time_match.group(0))
+        if time_match
+        else None
+    )
+
+    duration_match = DURATION_RE.search(header)
+
+    duration = (
+        int(float(duration_match.group(1)))
+        if duration_match
+        else None
+    )
+
+    return name, date_time, duration
+
+
+def remove_date_time(value):
+    value = DATE_TIME_RE.sub(" ", value)
+    value = DATE_RE.sub(" ", value)
+    value = TIME_RE.sub(" ", value)
+
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_mode_line(line):
+    return bool(
+        re.match(r"^\s*MODE\b", line, re.IGNORECASE)
+    )
+
+
+def parse_step_row(step_id, row_lines, warnings):
+    description_parts = []
+    additional_failure_parts = []
+
+    found_status = None
+    description_finished = False
+
+    for raw_line in row_lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # MODE rows and separator lines are not descriptions.
+        if is_mode_line(line):
+            continue
+
+        if re.match(r"^[\s\-_=*|]+$", line):
+            continue
+
+        # Detect a status appearing on its own line.
+        status_match = STATUS_RE.match(line)
+
+        if status_match:
+            found_status = status_match.group(1).lower()
+            continue
+
+        # Detect a status at the end of a line.
+        # Only treat it as the table status when the line
+        # also contains a date or time.
+        suffix_match = re.search(
+            r"\b(Success|Failure|Suspend|Progress)\s*$",
+            line,
+            re.IGNORECASE
+        )
+
+        has_date_or_time = bool(
+            DATE_RE.search(line) or TIME_RE.search(line)
+        )
+
+        if suffix_match and has_date_or_time:
+            found_status = suffix_match.group(1).lower()
+
+            line = line[:suffix_match.start()].strip()
+
+        date_match = DATE_RE.search(line)
+        time_match = TIME_RE.search(line)
+
+        positions = []
+
+        if date_match:
+            positions.append(date_match.start())
+
+        if time_match:
+            positions.append(time_match.start())
+
+        if positions:
+            # The first date/time marks the boundary between
+            # the short STEP description and any extra details.
+            boundary = min(positions)
+
+            description_text = line[:boundary].strip()
+
+            if description_text:
+                if not description_finished:
+                    cleaned = STEP_ID_RE.sub(
+                        "", description_text
+                    ).strip()
+
+                    if cleaned:
+                        description_parts.append(cleaned)
+
+            description_finished = True
+            continue
+
+        # Before the timestamp, collect the short description.
+        if not description_finished:
+            cleaned = remove_date_time(line)
+            cleaned = STEP_ID_RE.sub("", cleaned).strip()
+
+            if cleaned:
+                description_parts.append(cleaned)
+
+        else:
+            # After the timestamp, retain possible explanatory
+            # text separately. Include it only if the final
+            # detected status for this STEP is Failure.
+            cleaned = remove_date_time(line)
+            cleaned = STEP_ID_RE.sub("", cleaned).strip()
+
+            if cleaned:
+                additional_failure_parts.append(cleaned)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+
+    additional_failure_text = re.sub(
+        r"\s+",
+        " ",
+        " ".join(additional_failure_parts)
+    ).strip()
+
+    # Additional explanatory text belongs only to failed STEP IDs.
+    if found_status == "failure" and additional_failure_text:
+        if description:
+            description += ", " + additional_failure_text
+        else:
+            description = additional_failure_text
+
+    if found_status is None:
+        warnings.append(
+            "STEP " + step_id +
+            " has no confidently detected status; "
+            "it was not added to a status list."
+        )
+
+    return found_status, description
+
+
+def extract_steps(block):
+    status = dict(
+        (name, []) for name in STATUS_NAMES
+    )
+
+    descriptions = {}
+    warnings = []
+
+    lines = block.splitlines()
+
+    table_started = False
+    rows = []
+    current_id = None
+    current_lines = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # The table header can occupy one line or several lines.
+        if (
+            not table_started
+            and re.search(r"\bSTEP\s+ID\b", line, re.IGNORECASE)
+        ):
+            table_started = True
+            continue
+
+        if not table_started:
+            continue
+
+        # MODE rows terminate the current STEP.
+        if is_mode_line(line):
+            if current_id is not None:
+                rows.append((current_id, current_lines))
+                current_id = None
+                current_lines = []
+
+            continue
+
+        step_match = STEP_ID_RE.match(line)
+
+        if step_match:
+            if current_id is not None:
+                rows.append((current_id, current_lines))
+
+            current_id = step_match.group(1)
+            remainder = line[step_match.end():].strip()
+
+            current_lines = (
+                [remainder] if remainder else []
+            )
+
+        elif current_id is not None:
+            # Continuation text stays with the current STEP
+            # until another recognized STEP ID or MODE row.
+            current_lines.append(line)
+
+    if current_id is not None:
+        rows.append((current_id, current_lines))
+
+    seen_ids = set()
+
+    for step_id, row_lines in rows:
+        if step_id in seen_ids:
+            warnings.append(
+                "Duplicate STEP ID " + step_id +
+                " found within one procedure execution."
+            )
+
+        seen_ids.add(step_id)
+
+        step_status, description = parse_step_row(
+            step_id, row_lines, warnings
+        )
+
+        descriptions[step_id] = description
+
+        if step_status in STATUS_NAMES:
+            status[step_status].append(step_id)
+
+    return status, descriptions, warnings
+
+
+def parse_pdf_text(text, source_name="unknown PDF"):
+    executions = []
+    warnings = []
+
+    blocks = split_procedure_blocks(text)
+
+    if not blocks:
+        warnings.append(
+            source_name +
+            ": no Procedure: headers were detected."
+        )
+
+    for index, block in enumerate(blocks, 1):
+        name, date_time, duration = extract_metadata(block)
+
+        if not name:
+            warnings.append(
+                source_name + ": execution " + str(index) +
+                " has no procedure name."
+            )
+
+        if date_time is None:
+            warnings.append(
+                source_name + ": execution " + str(index) +
+                " has an unrecognized header timestamp."
+            )
+
+        if duration is None:
+            warnings.append(
+                source_name + ": execution " + str(index) +
+                " has an unrecognized duration."
+            )
+
+        status, descriptions, row_warnings = extract_steps(block)
+
+        for warning in row_warnings:
+            warnings.append(
+                source_name + " / execution " +
+                str(index) + ": " + warning
+            )
+
+        if status["failure"]:
+            final_status = "Failure"
+            final_reason = []
+
+            for step_id in status["failure"]:
+                reason = descriptions.get(step_id, "")
+
+                final_reason.append({
+                    step_id: reason
+                })
+
+                if not reason:
+                    warnings.append(
+                        source_name + ": failed STEP " +
+                        step_id +
+                        " has no extracted description."
+                    )
+
+        else:
+            final_status = "Success"
+            final_reason = "None"
+
+        executions.append({
+            "Procedure Name": name,
+            "date_time": date_time if date_time else "",
+            "Dur": duration if duration is not None else 0,
+            "Status": status,
+            "final_status": final_status,
+            "final_status_reason": final_reason
+        })
+
+    return executions, warnings
+
+
+def validate_execution(execution):
+    issues = []
+    status = execution.get("Status", {})
+
+    for name in STATUS_NAMES:
+        if (
+            name not in status
+            or not isinstance(status[name], list)
+        ):
+            issues.append(
+                "Status key '" + name +
+                "' is missing or invalid."
+            )
+
+    all_ids = []
+
+    for name in STATUS_NAMES:
+        all_ids.extend(status.get(name, []))
+
+    if len(all_ids) != len(set(all_ids)):
+        issues.append(
+            "A STEP ID appears more than once "
+            "across status categories."
+        )
+
+    if execution.get("final_status") not in (
+        "Failure", "Success"
+    ):
+        issues.append(
+            "final_status must be Failure or Success."
+        )
+
+    if (
+        status.get("failure")
+        and execution.get("final_status") != "Failure"
+    ):
+        issues.append(
+            "A failed STEP exists but final_status "
+            "is not Failure."
+        )
+
+    if (
+        not status.get("failure")
+        and execution.get("final_status") != "Success"
+    ):
+        issues.append(
+            "No failed STEP exists but final_status "
+            "is not Success."
+        )
+
+    return issues
+
+Step 2 — What this version preserves and changes
+
+Area
+
+	
+
+Behaviour
+
+
+
+
+Procedure names
+
+	
+
+Extracted names are returned unchanged; your current main.py uses exact names as keys.
+
+
+
+
+Date and time
+
+	
+
+Normalized to YYYY-MM-DD HH:MM:SS.mmm.
+
+
+
+
+Duration
+
+	
+
+Converted to an integer, as before.
+
+
+
+
+Status
+
+	
+
+Maintains all four arrays: success, failure, suspend, and progress.
+
+
+
+
+Final status
+
+	
+
+Failure if at least one failed STEP exists; otherwise Success.
+
+
+
+
+Successful execution reason
+
+	
+
+"None".
+
+
+
+
+Failed execution reason
+
+	
+
+Includes the short STEP description and collected continuation text for a failure.
+
+
+
+
+99.999
+
+	
+
+Excluded by the updated STEP ID pattern.
+
+
+
+
+MODE and separators
+
+	
+
+Ignored when parsing the STEP description.
+
+
+
+
+Validation
+
+	
+
+Checks the status arrays, duplicate STEP IDs, and final-status consistency.
+
+For example, if the extracted STEP text contains:
+
+01.004  CHECK THIS  12-Dec-2024 11:33:44:456 Failure
+---------------------------------------------------
+WE HAVE CHECKED THIS PROPERLY
+---------------------------------------------------
+01.005  CHECK ANOTHER  13-Dec-2024 10:32:14:556 Success
+
+The intended result for the failed STEP is:
+
+{
+    "01.004": "CHECK THIS, WE HAVE CHECKED THIS PROPERLY"
+}
+
+The next STEP's description and status should not be included in that reason.
+
+Important limitation: This relies on the parser correctly recognizing the next STEP ID. Unusual PDF layouts, missing STEP IDs, or continuation text that itself resembles a STEP row still require testing against the actual extracted text. The code is reconstructed from the history you supplied; I have not executed it against your PDFs here.
+
+Step 3 — Run your existing tests
+
+Save the file, open your PyCharm terminal in the project directory, and run:
+
+python -m unittest discover -s tests -v
+
+Your existing four tests should be your first check. If they pass, also verify the new behaviour using a small PDF that has a failure followed by explanatory text.
+
+Step 4 — Verify the new failure reason
+
+Check these cases manually:
+
+A failure with no additional explanation.
+
+A failure with one explanatory line.
+
+A failure with several explanatory lines.
+
+A failure followed by another STEP ID.
+
+A successful STEP with continuation text, which must not append that text to a failure reason.
+
+A MODE row and a 99.999 row.
+
+If these behave correctly, run the 115-page PDF again and compare the affected output against the source PDF.
+
+Do not change main.py for this particular improvement. Your existing main.py already receives the final_status_reason returned by parse_pdf_text() and writes it into the JSON. The intended change is confined to pdf_parser.py.
+
+Replace pdf_parser.py with the updated code and save it. Keep pdf_parser_backup.py unchanged.
+
+Run the four unit tests in the PyCharm terminal:
+
+python -m unittest discover -s tests -v
+
+If all four tests pass, run main.py with a small PDF first.
+
+Check the generated JSON, especially the failure reasons and whether the next STEP's description is excluded.
+
+If those checks pass, run your 115-page PDF.
+
+When you're done, tell me:
+
+Whether the four tests passed.
+
+Whether the program ran successfully.
+
+Whether the failure descriptions were extracted correctly.
+
+Any warnings or errors you encountered.
+
+One important thing: Passing the tests confirms only the tested cases. We'll use your actual output to verify the new behaviour before considering it reliable.
+
+Go ahead and run it. I'll help you troubleshoot anything that comes up.
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+LAST CHAT LAST WHAT WE DID -->
+
+
+
+	Okay, I've gone through your complete pdf_parser.py code. And no problem that you don't have the PDF right now — we can still identify a major issue in the current logic and improve it using test cases.
+
+1. Why your current code is inconsistent
+
+The main problem is in parse_step_row().
+
+Your code currently tries to do two things:
+
+Extract the short STEP description before the timestamp.
+
+Extract the additional failure explanation after the timestamp.
+
+However, it assumes that every line after the timestamp belongs to the failure explanation until another STEP ID or a MODE row appears.
+
+That is not always safe. The extracted text can contain status information, table headers, separators, or unrelated rows. Also, the parser cannot reliably determine whether a line is a genuine failure explanation or unrelated content just because it appears after a timestamp.
+
+There's another important detail: your extract_steps() function uses STEP IDs to identify row boundaries. If the PDF text extraction doesn't preserve a STEP ID at the start of a line, the boundary detection may fail.
+
+So we need to improve both the extraction rules and the tests, rather than changing one line and hoping it works.
+
+I found a specific problem in your current code: when the timestamp appears in the middle of a line, parse_step_row() keeps the text before the timestamp and immediately continues to the next line. Any explanatory text after the timestamp on that same line is discarded.
+
+For example, this input:
+
+01.004 CHECK THIS 12-Dec-2024 11:33:44:456 Failure WE HAVE CHECKED THIS PROPERLY
+
+can produce only CHECK THIS, losing the explanation.
+
+What we should do next
+
+Since you don't have the PDF available right now, I recommend this approach:
+
+Keep your pdf_parser_backup.py unchanged.
+
+Don't change main.py; the problem is in the parser.
+
+Fix parse_step_row() so it can capture explanatory text both after a timestamp on the same line and on subsequent lines.
+
+Preserve the rule that the explanation is appended only for failed steps.
+
+Add tests covering different layouts, including timestamps and statuses on separate lines, multiline explanations, and the next STEP ID.
+
+Run the tests before trying the full PDF again.
+
+One other issue needs attention: your current STEP_ID_RE excludes 99.999, but extract_steps() may then treat a 99.999 row as continuation text belonging to the preceding step. We should explicitly skip that entire row so it cannot contaminate a failure reason.
+
+Important limitation: We can test these layouts using synthetic text even without the PDF. However, we cannot confirm the extraction is fully accurate for your actual documents until you can test against a real PDF or its extracted text.
+
+I recommend fixing both issues together rather than making another small change and potentially introducing a new problem. Keep your current working backup until the updated parser and its tests pass.
+
+
+
