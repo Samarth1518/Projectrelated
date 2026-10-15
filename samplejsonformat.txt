@@ -1,0 +1,31 @@
+
+{
+  "example.tst": {
+    "procedures": [
+      {
+        "date_time": "2025-12-31 11:44:33.256",
+        "Dur": 203,
+        "Status": {
+          "success": ["01.001"],
+          "failure": ["01.002", "01.008"],
+          "suspend": ["01.005"],
+          "progress": ["01.004", "01.013"]
+        },
+        "final_status": "Failure",
+        "final_status_reason": [
+          {
+            "01.002": "STEP description, additional failure explanation"
+          },
+          {
+            "01.008": "STEP description, additional failure explanation"
+          }
+        ]
+      }
+    ]
+  },
+  "Insights": {
+    "Total PDFs read": 16,
+    "PDF names": ["example.pdf"],
+    "Total Pages read": 41818
+  }
+}
