@@ -1,0 +1,58 @@
+FINAL PLANNED STRUCTURE 
+
+
+
+{
+  "example.tst": {
+    "procedures": [
+      {
+        "date_time": "2025-12-31 11:44:33.256",
+        "Dur": 203,
+        "Status": {
+          "success": ["01.001", "01.003"],
+          "failure": ["01.002"],
+          "suspend": ["01.005"],
+          "progress": ["01.004"]
+        },
+        "final_status": "Failure",
+        "final_status_reason": [
+          {
+            "01.002": "STEP description, failure explanation"
+          }
+        ],
+        "mode_executions": {
+          "auto": {
+            "date_time_status": [
+              {
+                "date_time": "2025-12-31 11:50:00.000",
+                "status": "Success"
+              }
+            ],
+            "success": ["01.003"],
+            "failure": [],
+            "progress": [],
+            "suspend": []
+          },
+          "manual": {
+            "success": ["01.001"],
+            "failure": ["01.002"],
+            "progress": ["01.004"],
+            "suspend": ["01.005"]
+          }
+        }
+      }
+    ]
+  },
+  "Insights": {
+    "Total PDFs read": 16,
+    "PDF names": ["example.pdf"],
+    "Total Pages read": 41818
+  }
+}
+
+
+
+
+
+
+
