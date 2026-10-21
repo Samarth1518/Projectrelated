@@ -1,0 +1,1931 @@
+Part 1 — Replace the complete pdf_parser.py
+
+In PyCharm, open pdf_parser.py.
+
+Press Ctrl+A to select all its contents.
+
+Delete the selected code.
+
+Paste the complete code below.
+
+Save with Ctrl+S.
+
+This is the complete file, not just individual functions.
+
+
+
+import re
+from datetime import datetime
+
+STATUS_NAMES = ("success", "failure", "suspend", "progress")
+
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+STEP_ID_RE = re.compile(
+    r"^\s*(?!99\.999\b)(\d{2}\.\d{3,4})\b"
+)
+
+MODE_LINE_RE = re.compile(
+    r"^\s*MODE\s+(AUTO|MANUAL)\b",
+    re.IGNORECASE
+)
+
+DATE_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[-/]([A-Za-z]{3}|\d{1,2})[-/](\d{4})"
+    r"\s+(\d{1,2}):(\d{2}):(\d{2})[:.](\d{1,3})(?!\d)",
+    re.IGNORECASE
+)
+
+DATE_RE = re.compile(
+    r"(?<!\d)\d{1,2}[-/](?:[A-Za-z]{3}|\d{1,2})[-/]\d{4}(?!\d)",
+    re.IGNORECASE
+)
+
+TIME_RE = re.compile(
+    r"(?<!\d)\d{1,2}:\d{2}:\d{2}[:.]\d{1,3}(?!\d)"
+)
+
+DURATION_RE = re.compile(
+    r"\bDur\s*:\s*(\d+(?:\.\d+)?)\s*\(s\)",
+    re.IGNORECASE
+)
+
+STATUS_RE = re.compile(
+    r"^(Success|Failure|Suspend|Progress)$",
+    re.IGNORECASE
+)
+
+STATUS_SUFFIX_RE = re.compile(
+    r"\b(Success|Failure|Suspend|Progress)\s*$",
+    re.IGNORECASE
+)
+
+
+def normalize_procedure_name(name):
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def normalize_datetime(value):
+    match = DATE_TIME_RE.search(value or "")
+
+    if not match:
+        return None
+
+    day, month_text, year, hour, minute, second, millis = (
+        match.groups()
+    )
+
+    if month_text.isdigit():
+        month = int(month_text)
+    else:
+        month = MONTHS.get(month_text.lower()[:3])
+
+    if not month or not 1 <= month <= 12:
+        return None
+
+    try:
+        parsed = datetime(
+            int(year),
+            month,
+            int(day),
+            int(hour),
+            int(minute),
+            int(second)
+        )
+    except ValueError:
+        return None
+
+    millis = millis[:3].ljust(3, "0")
+
+    return (
+        parsed.strftime("%Y-%m-%d %H:%M:%S")
+        + "."
+        + millis
+    )
+
+
+def split_procedure_blocks(text):
+    matches = list(
+        re.finditer(r"\bProcedure\s*:", text, re.IGNORECASE)
+    )
+
+    blocks = []
+
+    for index, match in enumerate(matches):
+        start = match.start()
+
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+
+        blocks.append(text[start:end])
+
+    return blocks
+
+
+def extract_metadata(block):
+    name_match = re.search(
+        r"\bProcedure\s*:\s*(.*?)\s+\bTime\s*:",
+        block,
+        re.IGNORECASE | re.DOTALL
+    )
+
+    name = ""
+
+    if name_match:
+        name = re.sub(
+            r"\s+", " ", name_match.group(1)
+        ).strip()
+
+    # Extract metadata only from the procedure header.
+    table_match = re.search(
+        r"\bSTEP\s+ID\b", block, re.IGNORECASE
+    )
+
+    header = (
+        block[:table_match.start()]
+        if table_match
+        else block
+    )
+
+    time_match = DATE_TIME_RE.search(header)
+
+    date_time = (
+        normalize_datetime(time_match.group(0))
+        if time_match
+        else None
+    )
+
+    duration_match = DURATION_RE.search(header)
+
+    duration = (
+        int(float(duration_match.group(1)))
+        if duration_match
+        else None
+    )
+
+    return name, date_time, duration
+
+
+def remove_date_time(value):
+    value = DATE_TIME_RE.sub(" ", value)
+    value = DATE_RE.sub(" ", value)
+    value = TIME_RE.sub(" ", value)
+
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_mode_line(line):
+    return bool(MODE_LINE_RE.match(line or ""))
+
+
+def parse_mode_line(line):
+    match = MODE_LINE_RE.match(line or "")
+
+    if not match:
+        return None, None
+
+    mode = match.group(1).lower()
+
+    time_match = DATE_TIME_RE.search(line)
+
+    date_time = (
+        normalize_datetime(time_match.group(0))
+        if time_match
+        else None
+    )
+
+    status_match = STATUS_SUFFIX_RE.search(line)
+
+    mode_status = (
+        status_match.group(1).capitalize()
+        if status_match
+        else None
+    )
+
+    return mode, {
+        "date_time": date_time,
+        "status": mode_status
+    }
+
+
+def parse_step_row(step_id, row_lines, warnings):
+    description_parts = []
+    additional_failure_parts = []
+
+    found_status = None
+    description_finished = False
+
+    for raw_line in row_lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        if is_mode_line(line):
+            continue
+
+        if re.fullmatch(r"[\s\-_=*|]+", line):
+            continue
+
+        # Detect a status on its own line.
+        standalone_status = STATUS_RE.match(line)
+
+        if standalone_status:
+            found_status = standalone_status.group(1).lower()
+            continue
+
+        # Detect a status at the end of a table row.
+        suffix_match = STATUS_SUFFIX_RE.search(line)
+
+        has_date_or_time = bool(
+            DATE_RE.search(line) or TIME_RE.search(line)
+        )
+
+        if suffix_match and has_date_or_time:
+            found_status = suffix_match.group(1).lower()
+            line = line[:suffix_match.start()].strip()
+
+        date_match = DATE_RE.search(line)
+        time_match = TIME_RE.search(line)
+
+        positions = []
+
+        if date_match:
+            positions.append(date_match.start())
+
+        if time_match:
+            positions.append(time_match.start())
+
+        if positions:
+            # The timestamp separates the short description
+            # from any additional text on the same line.
+            boundary = min(positions)
+
+            before_time = line[:boundary].strip()
+            after_time = line[boundary:].strip()
+
+            if before_time and not description_finished:
+                cleaned = STEP_ID_RE.sub(
+                    "", before_time
+                ).strip()
+
+                if cleaned:
+                    description_parts.append(cleaned)
+
+            cleaned = remove_date_time(after_time)
+
+            cleaned = STATUS_SUFFIX_RE.sub(
+                "", cleaned
+            ).strip()
+
+            cleaned = STEP_ID_RE.sub(
+                "", cleaned
+            ).strip()
+
+            if cleaned:
+                additional_failure_parts.append(cleaned)
+
+            description_finished = True
+            continue
+
+        cleaned = remove_date_time(line)
+        cleaned = STEP_ID_RE.sub("", cleaned).strip()
+
+        if not cleaned:
+            continue
+
+        if not description_finished:
+            description_parts.append(cleaned)
+        else:
+            # Preserve continuation lines until the next STEP
+            # or MODE row. Include these in the reason if failed.
+            additional_failure_parts.append(cleaned)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+
+    additional_failure_text = re.sub(
+        r"\s+", " ", " ".join(additional_failure_parts)
+    ).strip()
+
+    if found_status == "failure" and additional_failure_text:
+        description = (
+            description + ", " + additional_failure_text
+            if description
+            else additional_failure_text
+        )
+
+    if found_status is None:
+        warnings.append(
+            "STEP " + step_id
+            + " has no confidently detected status; "
+            + "it was not added to a status list."
+        )
+
+    return found_status, description
+
+
+def extract_steps(block, include_modes=False):
+    status = {
+        name: [] for name in STATUS_NAMES
+    }
+
+    descriptions = {}
+    warnings = []
+
+    mode_status = {
+        "auto": {
+            name: [] for name in STATUS_NAMES
+        },
+        "manual": {
+            name: [] for name in STATUS_NAMES
+        }
+    }
+
+    auto_date_time_status = []
+
+    # Every procedure starts in Manual mode.
+    current_mode = "manual"
+
+    lines = block.splitlines()
+
+    table_started = False
+    rows = []
+    current_id = None
+    current_lines = []
+    current_step_mode = "manual"
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # Ignore header content before the STEP table.
+        if (
+            not table_started
+            and re.search(
+                r"\bSTEP\s+ID\b", line, re.IGNORECASE
+            )
+        ):
+            table_started = True
+            continue
+
+        if not table_started:
+            continue
+
+        # A MODE row closes the previous STEP and changes
+        # the mode for subsequent STEP rows.
+        if is_mode_line(line):
+            if current_id is not None:
+                rows.append(
+                    (
+                        current_id,
+                        current_lines,
+                        current_step_mode
+                    )
+                )
+
+                current_id = None
+                current_lines = []
+
+            mode, mode_info = parse_mode_line(line)
+
+            if mode:
+                current_mode = mode
+
+                if mode == "auto":
+                    auto_date_time_status.append({
+                        "date_time": (
+                            mode_info["date_time"] or ""
+                        ),
+                        "status": (
+                            mode_info["status"] or ""
+                        )
+                    })
+
+                    if (
+                        not mode_info["date_time"]
+                        or not mode_info["status"]
+                    ):
+                        warnings.append(
+                            "MODE AUTO row has a missing or "
+                            "unrecognized timestamp/status."
+                        )
+
+            continue
+
+        step_match = STEP_ID_RE.match(line)
+
+        if step_match:
+            if current_id is not None:
+                rows.append(
+                    (
+                        current_id,
+                        current_lines,
+                        current_step_mode
+                    )
+                )
+
+            current_id = step_match.group(1)
+
+            remainder = line[step_match.end():].strip()
+
+            current_lines = (
+                [remainder] if remainder else []
+            )
+
+            current_step_mode = current_mode
+
+        elif current_id is not None:
+            # Keep continuation lines with the current STEP.
+            current_lines.append(line)
+
+    if current_id is not None:
+        rows.append(
+            (
+                current_id,
+                current_lines,
+                current_step_mode
+            )
+        )
+
+    seen_ids = set()
+
+    for step_id, row_lines, step_mode in rows:
+        if step_id in seen_ids:
+            warnings.append(
+                "Duplicate STEP ID " + step_id
+                + " found within one procedure execution."
+            )
+
+        seen_ids.add(step_id)
+
+        step_status, description = parse_step_row(
+            step_id,
+            row_lines,
+            warnings
+        )
+
+        descriptions[step_id] = description
+
+        if step_status in STATUS_NAMES:
+            status[step_status].append(step_id)
+
+            mode_status[step_mode][step_status].append(
+                step_id
+            )
+
+    if include_modes:
+        mode_executions = {
+            "auto": {
+                "date_time_status": auto_date_time_status,
+                **mode_status["auto"]
+            },
+            "manual": mode_status["manual"]
+        }
+
+        return (
+            status,
+            descriptions,
+            warnings,
+            mode_executions
+        )
+
+    # Preserve the original three-value return for callers
+    # that do not request mode information.
+    return status, descriptions, warnings
+
+
+def parse_pdf_text(text, source_name="unknown PDF"):
+    executions = []
+    warnings = []
+
+    blocks = split_procedure_blocks(text)
+
+    if not blocks:
+        warnings.append(
+            source_name
+            + ": no Procedure: headers were detected."
+        )
+
+    for index, block in enumerate(blocks, 1):
+        name, date_time, duration = extract_metadata(block)
+
+        if not name:
+            warnings.append(
+                source_name + ": execution "
+                + str(index) + " has no procedure name."
+            )
+
+        if date_time is None:
+            warnings.append(
+                source_name + ": execution "
+                + str(index)
+                + " has an unrecognized header timestamp."
+            )
+
+        if duration is None:
+            warnings.append(
+                source_name + ": execution "
+                + str(index)
+                + " has an unrecognized duration."
+            )
+
+        (
+            status,
+            descriptions,
+            row_warnings,
+            mode_executions
+        ) = extract_steps(block, include_modes=True)
+
+        for warning in row_warnings:
+            warnings.append(
+                source_name + " / execution "
+                + str(index) + ": " + warning
+            )
+
+        if status["failure"]:
+            final_status = "Failure"
+
+            final_reason = [
+                {
+                    step_id: descriptions.get(step_id, "")
+                }
+                for step_id in status["failure"]
+            ]
+
+            for step_id in status["failure"]:
+                if not descriptions.get(step_id, ""):
+                    warnings.append(
+                        source_name + ": failed STEP "
+                        + step_id
+                        + " has no extracted description."
+                    )
+        else:
+            final_status = "Success"
+            final_reason = "None"
+
+        executions.append({
+            "Procedure Name": name,
+            "date_time": date_time if date_time else "",
+            "Dur": duration if duration is not None else 0,
+            "Status": status,
+            "final_status": final_status,
+            "final_status_reason": final_reason,
+            "mode_executions": mode_executions
+        })
+
+    return executions, warnings
+
+
+def validate_execution(execution):
+    issues = []
+    status = execution.get("Status", {})
+
+    for name in STATUS_NAMES:
+        if (
+            name not in status
+            or not isinstance(status[name], list)
+        ):
+            issues.append(
+                "Status key '" + name
+                + "' is missing or invalid."
+            )
+
+    all_ids = []
+
+    for name in STATUS_NAMES:
+        all_ids.extend(status.get(name, []))
+
+    if len(all_ids) != len(set(all_ids)):
+        issues.append(
+            "A STEP ID appears more than once "
+            "across status categories."
+        )
+
+    if execution.get("final_status") not in (
+        "Failure", "Success"
+    ):
+        issues.append(
+            "final_status must be Failure or Success."
+        )
+
+    if (
+        status.get("failure")
+        and execution.get("final_status") != "Failure"
+    ):
+        issues.append(
+            "A failed STEP exists but final_status "
+            "is not Failure."
+        )
+
+    if (
+        not status.get("failure")
+        and execution.get("final_status") != "Success"
+    ):
+        issues.append(
+            "No failed STEP exists but final_status "
+            "is not Success."
+        )
+
+    return issues
+    
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    Part 2 — Make the changes in main.py
+
+You do not need to replace all of main.py. Make only these two edits.
+
+Change A — Preserve mode_executions
+
+Open main.py.
+
+Press Ctrl+F.
+
+Search for grouped[group_key]["procedures"].append.
+
+Find the block that looks like this:
+
+grouped[group_key]["procedures"].append({
+    "date_time": execution["date_time"],
+    "Dur": execution["Dur"],
+    "Status": execution["Status"],
+    "final_status": execution["final_status"],
+    "final_status_reason": execution["final_status_reason"]
+})
+
+5. Replace that entire block with:
+
+grouped[group_key]["procedures"].append({
+    "date_time": execution["date_time"],
+    "Dur": execution["Dur"],
+    "Status": execution["Status"],
+    "final_status": execution["final_status"],
+    "final_status_reason": execution["final_status_reason"],
+    "mode_executions": execution["mode_executions"]
+})
+
+This is necessary because main.py explicitly selects which fields go into the final JSON. Without this change, the mode information would be discarded.
+
+Change B — Keep your Insights metadata
+
+Search for output_data = list(grouped.values()).
+
+Replace the existing output metadata block with:
+
+output_data = list(grouped.values())
+
+insights_key = "Insights"
+counter = 1
+
+while any(
+    insights_key in item
+    for item in output_data
+    if isinstance(item, dict)
+):
+    insights_key = "Insights" + str(counter)
+    counter += 1
+
+output_data.append({
+    insights_key: {
+        "Total PDFs read": total_pdfs_read,
+        "PDF names": pdf_names,
+        "Total Pages read": total_pages_read
+    }
+})
+
+Keep everything after this block, including the timestamped output filename and JSON-writing logic, unchanged.
+
+Important: Your current main.py uses a list of procedure objects. This change preserves that existing layout; it does not convert the output to the dictionary-shaped JSON example you discussed earlier.
+
+Part 3 — Save and stop
+
+Save pdf_parser.py.
+
+Save main.py.
+
+Do not modify any other files.
+
+Do not run all 16 PDFs yet.
+
+The next step is to run the project on a small PDF and check three things:
+
+Does CHECK TM appear correctly?
+
+Does a failed STEP include its continuation lines?
+
+Do the overall status lists and mode_executions contain the correct STEP IDs?
+
+One limitation to keep in mind: this code recognizes the expected date/time and table layout. If PyMuPDF itself omits or rearranges text, the parser may still need a further adjustment. The first small-PDF result will tell us what needs attention.
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Step 1 — Check this entire section in main.py
+
+Make sure it looks exactly like this:
+
+
+output_data = {}
+
+for procedure_name, procedure_data in grouped.items():
+    output_data[procedure_name] = procedure_data
+
+insights_key = "Insights"
+counter = 1
+
+while insights_key in output_data:
+    insights_key = "Insights" + str(counter)
+    counter += 1
+
+output_data[insights_key] = {
+    "Total PDFs read": total_pdfs_read,
+    "PDF names": pdf_names,
+    "Total Pages read": total_pages_read
+}
+
+This preserves your existing procedure data and adds the Insights metadata. If Insights is already a procedure key, it uses Insights1, then Insights2, and so on.
+
+Step 2 — Save both files
+
+Save pdf_parser.py (Ctrl+S).
+
+Save main.py (Ctrl+S).
+
+Don't modify any other files.
+
+Step 3 — One important check before running
+
+You said your append block now uses:
+
+grouped["procedures"].append({
+    "date_time": execution["date_time"],
+    "Dur": execution["Dur"],
+    "Status": execution["Status"],
+    "final_status": execution["final_status"],
+    "final_status_reason": execution["final_status_reason"],
+    "mode_executions": execution["mode_executions"]
+})
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+THIS IS THE FINAL FULL CHANGE LEAVE THE PREVIOUS ONES SEE THESE 
+
+1. Replace pdf_parser.py
+
+Open your existing pdf_parser.py, select all its contents, and replace them with the following code.
+
+
+import re
+from datetime import datetime
+
+STATUS_NAMES = ("success", "failure", "suspend", "progress")
+
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+STEP_ID_RE = re.compile(
+    r"^\s*(?!99\.999\b)(\d{2}\.\d{3,4})\b"
+)
+
+MODE_LINE_RE = re.compile(
+    r"^\s*MODE\s*[:\-]?\s*(AUTO|MANUAL)\b",
+    re.IGNORECASE
+)
+
+DATE_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[-/]([A-Za-z]{3}|\d{1,2})[-/](\d{4})"
+    r"\s+(\d{1,2}):(\d{2}):(\d{2})[:.](\d{1,3})(?!\d)",
+    re.IGNORECASE
+)
+
+DATE_RE = re.compile(
+    r"(?<!\d)\d{1,2}[-/]([A-Za-z]{3}|\d{1,2})[-/]\d{4}(?!\d)",
+    re.IGNORECASE
+)
+
+TIME_RE = re.compile(
+    r"(?<!\d)\d{1,2}:\d{2}:\d{2}[:.]\d{1,3}(?!\d)"
+)
+
+DURATION_RE = re.compile(
+    r"\bDur\s*:\s*(\d+(?:\.\d+)?)\s*\(s\)",
+    re.IGNORECASE
+)
+
+STATUS_RE = re.compile(
+    r"^\s*(Success|Failure|Suspend|Progress)\s*$",
+    re.IGNORECASE
+)
+
+STATUS_SUFFIX_RE = re.compile(
+    r"\b(Success|Failure|Suspend|Progress)\s*$",
+    re.IGNORECASE
+)
+
+
+def normalize_procedure_name(name):
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def normalize_datetime(value):
+    match = DATE_TIME_RE.search(value or "")
+    if not match:
+        return None
+
+    day, month_text, year, hour, minute, second, millis = (
+        match.groups()
+    )
+
+    month = (
+        int(month_text)
+        if month_text.isdigit()
+        else MONTHS.get(month_text.lower()[:3])
+    )
+
+    if not month or not 1 <= month <= 12:
+        return None
+
+    try:
+        parsed = datetime(
+            int(year), month, int(day),
+            int(hour), int(minute), int(second)
+        )
+    except ValueError:
+        return None
+
+    return (
+        parsed.strftime("%Y-%m-%d %H:%M:%S")
+        + "."
+        + millis[:3].ljust(3, "0")
+    )
+
+
+def split_procedure_blocks(text):
+    matches = list(
+        re.finditer(r"\bProcedure\s*:", text, re.IGNORECASE)
+    )
+
+    return [
+        text[m.start():matches[i + 1].start()
+             if i + 1 < len(matches) else len(text)]
+        for i, m in enumerate(matches)
+    ]
+
+
+def extract_metadata(block):
+    name_match = re.search(
+        r"\bProcedure\s*:\s*(.*?)\s+\bTime\s*:",
+        block, re.IGNORECASE | re.DOTALL
+    )
+    name = (
+        re.sub(r"\s+", " ", name_match.group(1)).strip()
+        if name_match else ""
+    )
+
+    header_end = re.search(
+        r"\bSTEP\s+ID\b", block, re.IGNORECASE
+    )
+    header = block[:header_end.start()] if header_end else block
+
+    time_match = DATE_TIME_RE.search(header)
+    date_time = normalize_datetime(time_match.group(0)) if time_match else None
+
+    duration_match = DURATION_RE.search(header)
+    duration = (
+        int(float(duration_match.group(1)))
+        if duration_match else None
+    )
+
+    return name, date_time, duration
+
+
+def remove_date_time(value):
+    value = DATE_TIME_RE.sub(" ", value)
+    value = DATE_RE.sub(" ", value)
+    value = TIME_RE.sub(" ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_mode_line(line):
+    return bool(MODE_LINE_RE.match(line or ""))
+
+
+def parse_mode_line(line):
+    match = MODE_LINE_RE.match(line or "")
+    if not match:
+        return None, None
+
+    mode = match.group(1).lower()
+    time_match = DATE_TIME_RE.search(line)
+    status_match = STATUS_SUFFIX_RE.search(line)
+
+    return mode, {
+        "date_time": (
+            normalize_datetime(time_match.group(0))
+            if time_match else None
+        ),
+        "status": (
+            status_match.group(1).capitalize()
+            if status_match else None
+        )
+    }
+
+
+def parse_step_row(step_id, row_lines, warnings):
+    description_parts = []
+    failure_detail_parts = []
+    found_status = None
+    timestamp_seen = False
+
+    for raw_line in row_lines:
+        line = raw_line.strip()
+        if not line or is_mode_line(line):
+            continue
+        if re.fullmatch(r"[\s\-_=*|]+", line):
+            continue
+
+        standalone = STATUS_RE.match(line)
+        if standalone:
+            found_status = standalone.group(1).lower()
+            continue
+
+        # Prefer a status associated with a timestamped row.
+        suffix = STATUS_SUFFIX_RE.search(line)
+        has_date_time = bool(DATE_TIME_RE.search(line))
+        has_date_or_time = bool(DATE_RE.search(line) or TIME_RE.search(line))
+
+        if suffix and has_date_or_time:
+            found_status = suffix.group(1).lower()
+            line = line[:suffix.start()].strip()
+
+        dt = DATE_TIME_RE.search(line)
+        date = DATE_RE.search(line)
+        time = TIME_RE.search(line)
+
+        positions = [
+            m.start() for m in (dt, date, time) if m
+        ]
+
+        if positions:
+            boundary = min(positions)
+            before = line[:boundary].strip()
+            after = line[boundary:].strip()
+
+            if before:
+                before = STEP_ID_RE.sub("", before).strip()
+                if before:
+                    description_parts.append(before)
+
+            # Preserve text after the timestamp if it is present.
+            after = remove_date_time(after)
+            after = STATUS_SUFFIX_RE.sub("", after).strip()
+            after = STEP_ID_RE.sub("", after).strip()
+            if after:
+                failure_detail_parts.append(after)
+
+            timestamp_seen = True
+            continue
+
+        cleaned = remove_date_time(line)
+        cleaned = STEP_ID_RE.sub("", cleaned).strip()
+        if not cleaned:
+            continue
+
+        if not timestamp_seen:
+            description_parts.append(cleaned)
+        else:
+            failure_detail_parts.append(cleaned)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+    extra = re.sub(
+        r"\s+", " ", " ".join(failure_detail_parts)
+    ).strip()
+
+    if found_status is None:
+        warnings.append(
+            "STEP " + step_id +
+            " has no confidently detected status; it was not classified."
+        )
+    elif found_status == "failure" and extra:
+        description = (description + ", " + extra).strip(", ")
+
+    return found_status, description
+
+
+def extract_steps(block, include_modes=False):
+    status = {name: [] for name in STATUS_NAMES}
+    descriptions = {}
+    warnings = []
+
+    mode_status = {
+        mode: {name: [] for name in STATUS_NAMES}
+        for mode in ("auto", "manual")
+    }
+    auto_date_time_status = []
+
+    # Ignore mode-like text before the STEP table.
+    current_mode = "manual"
+    table_started = False
+    rows = []
+    current_id = None
+    current_lines = []
+    current_step_mode = "manual"
+
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if not table_started:
+            if re.search(r"\bSTEP\s+ID\b", line, re.IGNORECASE):
+                table_started = True
+            continue
+
+        if is_mode_line(line):
+            if current_id is not None:
+                rows.append((current_id, current_lines, current_step_mode))
+                current_id, current_lines = None, []
+
+            mode, info = parse_mode_line(line)
+            if mode:
+                current_mode = mode
+                if mode == "auto":
+                    if info["date_time"] and info["status"]:
+                        auto_date_time_status.append({
+                            "date_time": info["date_time"],
+                            "status": info["status"]
+                        })
+                    else:
+                        warnings.append(
+                            "MODE AUTO row has missing or unrecognized "
+                            "timestamp/status."
+                        )
+            continue
+
+        match = STEP_ID_RE.match(line)
+        if match:
+            if current_id is not None:
+                rows.append((current_id, current_lines, current_step_mode))
+
+            current_id = match.group(1)
+            remainder = line[match.end():].strip()
+            current_lines = [remainder] if remainder else []
+            current_step_mode = current_mode
+        elif current_id is not None:
+            current_lines.append(line)
+
+    if current_id is not None:
+        rows.append((current_id, current_lines, current_step_mode))
+
+    seen_ids = set()
+    for step_id, row_lines, step_mode in rows:
+        if step_id in seen_ids:
+            warnings.append(
+                "Duplicate STEP ID " + step_id +
+                " found within one procedure execution."
+            )
+        seen_ids.add(step_id)
+
+        step_status, description = parse_step_row(
+            step_id, row_lines, warnings
+        )
+        descriptions[step_id] = description
+
+        if step_status in STATUS_NAMES:
+            status[step_status].append(step_id)
+            mode_status[step_mode][step_status].append(step_id)
+
+    if include_modes:
+        return status, descriptions, warnings, {
+            "auto": {
+                "date_time_status": auto_date_time_status,
+                **mode_status["auto"]
+            },
+            "manual": mode_status["manual"]
+        }
+
+    return status, descriptions, warnings
+
+
+def parse_pdf_text(text, source_name="unknown PDF"):
+    executions = []
+    warnings = []
+    blocks = split_procedure_blocks(text)
+
+    if not blocks:
+        warnings.append(
+            source_name + ": no Procedure: headers were detected."
+        )
+
+    for index, block in enumerate(blocks, 1):
+        name, date_time, duration = extract_metadata(block)
+
+        if not name:
+            warnings.append(
+                source_name + " / execution " + str(index) +
+                ": procedure name was not detected."
+            )
+        if not date_time:
+            warnings.append(
+                source_name + " / execution " + str(index) +
+                ": header timestamp was not detected."
+            )
+        if duration is None:
+            warnings.append(
+                source_name + " / execution " + str(index) +
+                ": duration was not detected."
+            )
+
+        status, descriptions, row_warnings, modes = extract_steps(
+            block, include_modes=True
+        )
+        warnings.extend(
+            source_name + " / execution " + str(index) + ": " + w
+            for w in row_warnings
+        )
+
+        if status["failure"]:
+            final_status = "Failure"
+            final_reason = [
+                {sid: descriptions.get(sid, "")}
+                for sid in status["failure"]
+            ]
+            for sid in status["failure"]:
+                if not descriptions.get(sid, ""):
+                    warnings.append(
+                        source_name + ": failed STEP " + sid +
+                        " has no extracted description."
+                    )
+        elif any(
+            "has no confidently detected status" in w
+            for w in row_warnings
+        ):
+            # Avoid claiming success when extraction is incomplete.
+            final_status = "Unknown"
+            final_reason = "Unable to determine reliably"
+        else:
+            final_status = "Success"
+            final_reason = "None"
+
+        executions.append({
+            "Procedure Name": name,
+            "date_time": date_time or "",
+            "Dur": duration if duration is not None else 0,
+            "Status": status,
+            "final_status": final_status,
+            "final_status_reason": final_reason,
+            "mode_executions": modes
+        })
+
+    return executions, warnings
+
+
+def validate_execution(execution):
+    issues = []
+    status = execution.get("Status", {})
+
+    for name in STATUS_NAMES:
+        if not isinstance(status.get(name), list):
+            issues.append("Status key '" + name + "' is missing or invalid.")
+
+    all_ids = [
+        sid for name in STATUS_NAMES
+        for sid in status.get(name, [])
+    ]
+    if len(all_ids) != len(set(all_ids)):
+        issues.append("A STEP ID appears more than once across status categories.")
+
+    if execution.get("final_status") not in ("Failure", "Success", "Unknown"):
+        issues.append("Invalid final_status value.")
+
+    if status.get("failure") and execution.get("final_status") != "Failure":
+        issues.append("A failed STEP exists but final_status is not Failure.")
+
+    if not status.get("failure") and execution.get("final_status") == "Failure":
+        issues.append("final_status is Failure but no failed STEP was detected.")
+
+    return issues
+    
+
+-----------------------------------------------------------------------------------------------------------------------
+
+2. Replace main.py
+
+Open your existing main.py, select all, and replace it with the following. This keeps your existing input, output, and diagnostics folders, timestamped output files, and Insights metadata.
+
+
+
+import os
+import sys
+import json
+import traceback
+from datetime import datetime
+
+import fitz
+
+from pdf_parser import (
+    parse_pdf_text,
+    normalize_procedure_name,
+    validate_execution
+)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+DIAGNOSTICS_DIR = os.path.join(BASE_DIR, "diagnostics")
+
+
+def get_page_count(document):
+    return (
+        document.pageCount
+        if hasattr(document, "pageCount")
+        else document.page_count
+    )
+
+
+def load_page(document, page_index):
+    return (
+        document.loadPage(page_index)
+        if hasattr(document, "loadPage")
+        else document.load_page(page_index)
+    )
+
+
+def get_page_text(page):
+    return (
+        page.getText("text")
+        if hasattr(page, "getText")
+        else page.get_text("text")
+    )
+
+
+def prepare_folders():
+    for folder in (INPUT_DIR, OUTPUT_DIR, DIAGNOSTICS_DIR):
+        os.makedirs(folder, exist_ok=True)
+
+
+def write_diagnostic(lines):
+    path = os.path.join(DIAGNOSTICS_DIR, "diagnostic_report.txt")
+    with open(path, "w", encoding="utf-8") as report:
+        report.write("\n".join(lines) + "\n")
+    return path
+
+
+def read_pdf_text(pdf_path):
+    document = None
+    try:
+        document = fitz.open(pdf_path)
+        page_count = get_page_count(document)
+        text_parts = []
+        for page_index in range(page_count):
+            text_parts.append(get_page_text(load_page(document, page_index)))
+        return "\n".join(text_parts), page_count
+    finally:
+        if document is not None:
+            document.close()
+
+
+def main():
+    prepare_folders()
+
+    print("=" * 60)
+    print("PDF TO JSON DATASET CONVERTER")
+    print("=" * 60)
+    print("Python version:", sys.version.split()[0])
+    print("PyMuPDF version:", getattr(fitz, "VersionBind", "unknown"))
+    print("Project folder:", BASE_DIR)
+
+    diagnostics = [
+        "PDF-to-JSON diagnostic report",
+        "Run time: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Python version: " + sys.version.split()[0],
+        "PyMuPDF version: " + str(getattr(fitz, "VersionBind", "unknown")),
+        ""
+    ]
+
+    pdf_names = sorted(
+        filename for filename in os.listdir(INPUT_DIR)
+        if filename.lower().endswith(".pdf")
+        and os.path.isfile(os.path.join(INPUT_DIR, filename))
+    )
+
+    print("PDF files found:", len(pdf_names))
+    if not pdf_names:
+        message = "ERROR: No PDF files found inside input/."
+        print(message)
+        diagnostics.append(message)
+        print("Diagnostic report:", write_diagnostic(diagnostics))
+        return
+
+    grouped = {}
+    total_pdfs_read = 0
+    total_pages_read = 0
+    total_executions = 0
+    total_step_ids = 0
+    warning_count = 0
+    failed_files = []
+
+    for filename in pdf_names:
+        pdf_path = os.path.join(INPUT_DIR, filename)
+        print("\nProcessing:", filename)
+        diagnostics.append("FILE: " + filename)
+
+        try:
+            full_text, page_count = read_pdf_text(pdf_path)
+            total_pdfs_read += 1
+            total_pages_read += page_count
+
+            print("  Pages read:", page_count)
+            print("  Extracted text characters:", len(full_text))
+            diagnostics.append("  Pages read: " + str(page_count))
+            diagnostics.append(
+                "  Extracted text characters: " + str(len(full_text))
+            )
+
+            if not full_text.strip():
+                warning_count += 1
+                message = "WARNING: No selectable text extracted from " + filename
+                print(" ", message)
+                diagnostics.append(message)
+
+            executions, warnings = parse_pdf_text(full_text, filename)
+            print("  Procedure executions detected:", len(executions))
+            diagnostics.append(
+                "  Procedure executions detected: " + str(len(executions))
+            )
+
+            for warning in warnings:
+                warning_count += 1
+                print("  WARNING:", warning)
+                diagnostics.append("  WARNING: " + warning)
+
+            for execution in executions:
+                procedure_name = execution["Procedure Name"]
+                group_key = normalize_procedure_name(procedure_name)
+
+                if not group_key:
+                    warning_count += 1
+                    message = (
+                        "Empty procedure name in " + filename +
+                        "; execution skipped."
+                    )
+                    print("  WARNING:", message)
+                    diagnostics.append("  WARNING: " + message)
+                    continue
+
+                if group_key not in grouped:
+                    grouped[group_key] = {
+                        "Procedure Name": procedure_name,
+                        "procedures": []
+                    }
+
+                grouped[group_key]["procedures"].append({
+                    "date_time": execution["date_time"],
+                    "Dur": execution["Dur"],
+                    "Status": execution["Status"],
+                    "final_status": execution["final_status"],
+                    "final_status_reason": execution["final_status_reason"],
+                    "mode_executions": execution["mode_executions"]
+                })
+
+                total_executions += 1
+                for name in ("success", "failure", "suspend", "progress"):
+                    total_step_ids += len(execution["Status"][name])
+
+                for issue in validate_execution(execution):
+                    warning_count += 1
+                    message = filename + " / " + procedure_name + ": " + issue
+                    print("  VALIDATION WARNING:", message)
+                    diagnostics.append("  VALIDATION WARNING: " + message)
+
+            diagnostics.append("")
+
+        except Exception as error:
+            failed_files.append(filename)
+            warning_count += 1
+            message = "ERROR processing " + filename + ": " + repr(error)
+            print(" ", message)
+            diagnostics.append(message)
+            diagnostics.append(traceback.format_exc())
+            diagnostics.append("")
+
+    output_data = {}
+
+    for group in grouped.values():
+        procedure_name = group["Procedure Name"]
+        key = procedure_name
+        suffix = 1
+        while key in output_data:
+            key = procedure_name + " (" + str(suffix) + ")"
+            suffix += 1
+        output_data[key] = {
+            "procedures": group["procedures"]
+        }
+
+    insights_key = "Insights"
+    counter = 1
+    while insights_key in output_data:
+        insights_key = "Insights" + str(counter)
+        counter += 1
+
+    output_data[insights_key] = {
+        "Total PDFs read": total_pdfs_read,
+        "PDF names": pdf_names,
+        "Total Pages read": total_pages_read
+    }
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_filename = "output_" + timestamp + ".json"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        with open(output_path, "w", encoding="utf-8") as output_file:
+            json.dump(output_data, output_file, indent=4, ensure_ascii=False)
+
+        with open(output_path, "r", encoding="utf-8") as output_file:
+            json.load(output_file)
+
+    except Exception as error:
+        message = "FATAL: JSON write/verification failed: " + repr(error)
+        print(message)
+        diagnostics.append(message)
+        diagnostics.append(traceback.format_exc())
+        print("Diagnostic report:", write_diagnostic(diagnostics))
+        return
+
+    summary = [
+        "",
+        "RUN SUMMARY",
+        "PDFs read successfully: " + str(total_pdfs_read),
+        "Pages read: " + str(total_pages_read),
+        "Unique procedure-name groups: " + str(len(grouped)),
+        "Procedure executions added: " + str(total_executions),
+        "STEP IDs counted: " + str(total_step_ids),
+        "Warnings/errors: " + str(warning_count),
+        "Files with read errors: " +
+        (", ".join(failed_files) if failed_files else "None"),
+        "JSON output: " + output_path
+    ]
+
+    diagnostics.extend(summary)
+    print("\n" + "=" * 60)
+    for line in summary:
+        print(line)
+
+    print("JSON created and valid syntax:", output_path)
+    print("Diagnostic report:", write_diagnostic(diagnostics))
+    print("Compare extracted data against the source PDFs before relying on it.")
+
+
+if __name__ == "__main__":
+    main()
+    
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+LAST CHANGE THAT WAS TOLD TO DO BUT I HAVE NOT DONE THIS BELOW ONE YET JUST FOR REFERENCE I AM PUTTING THIS HERE 
+
+
+Now I can see the exact versions of both files you are running. We can identify one problem directly from main.py, and there is a likely cause of the Auto extraction problem in pdf_parser.py.
+
+Don't replace either file again just yet. Let's fix these issues based on the code you actually have.
+
+1. Why a new JSON file is created every run
+
+In your current main.py, you have:
+
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+output_filename = "output_" + timestamp + ".json"
+output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+Because the filename contains the current timestamp, every run creates a differently named JSON file.
+
+If you want the same file overwritten on every run, replace those three lines with:
+
+output_filename = "output.json"
+output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+The existing open(output_path, "w", ...) will overwrite output.json when the program reaches the JSON-writing section.
+
+Important: This change alone does not delete the older timestamped files already in your output folder. Leave them alone for now so we preserve your previous results.
+
+2. Why Auto data is missing
+
+Your current pdf_parser.py recognizes a mode marker only when MODE and AUTO or MANUAL appear on the same extracted line, for example:
+
+MODE    AUTO    11-Dec-2023  11:44:23:333    Success
+
+This is the relevant code:
+
+MODE_LINE_RE = re.compile(
+    r"^\s*MODE\s*[:\-]?\s*(AUTO|MANUAL)\b",
+    re.IGNORECASE
+)
+
+If PyMuPDF extracts the same table row as separate lines, such as:
+
+MODE
+AUTO
+11-Dec-2023 11:44:23:333 Success
+
+the current parser will not recognize that as an Auto marker. The subsequent STEP IDs may therefore remain assigned to Manual.
+
+That is a likely explanation, but we need to inspect the actual extracted text before deciding on the final parser fix.
+
+3. Let's diagnose the mode issue first
+
+Make this temporary diagnostic change in main.py.
+
+Find this existing section:
+
+full_text, page_count = read_pdf_text(pdf_path)
+total_pdfs_read += 1
+total_pages_read += page_count
+
+Immediately after it, insert:
+
+mode_lines = full_text.splitlines()
+
+for line_number, line in enumerate(mode_lines):
+    if re.search(r"\bMODE\b|\bAUTO\b|\bMANUAL\b", line, re.IGNORECASE):
+        start = max(0, line_number - 2)
+        end = min(len(mode_lines), line_number + 4)
+
+        diagnostics.append(
+            "MODE DEBUG - " + filename +
+            " - extracted lines " +
+            str(start + 1) + "-" + str(end)
+        )
+
+        for nearby_line in mode_lines[start:end]:
+            diagnostics.append(repr(nearby_line))
+
+At the top of main.py, add this import if it isn't already present:
+
+import re
+
+This temporary change records the extracted lines around mode markers in diagnostics/diagnostic_report.txt. It does not change the parser's mode-classification logic.
+
+Run main.py once more, then open the diagnostic report and check whether the extracted text contains MODE AUTO, separate MODE and AUTO lines, or some other layout.
+
+4. What we'll do after that
+
+Once we know how the mode rows actually appear in the extracted text, we'll fix the parser to handle that layout. We'll also verify that:
+
+Auto and Manual STEP IDs are separated correctly.
+
+Failure statuses are not silently classified as Success.
+
+Multi-line failure explanations are retained.
+
+The overall JSON structure matches your planned format.
+
+One final caution: your current parser deliberately returns Unknown when it detects a STEP without a confidently recognized status. That's safer than silently declaring Success, so we should preserve that protection.
+
+Your next action: Make the fixed output.json filename change, add the temporary diagnostic block, run the program, and inspect the mode-related entries in the diagnostic report. That will give us evidence for the next parser correction instead of another guess.
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+THE above are all code realted thing and this below is the full summary of what we did today okay this is the full today's summary and this is for reference
+
+
+1. Project goal
+
+The existing PDF_to_JSON project reads PDF files from input/, extracts procedure executions and STEP information, and generates JSON files in output/. Diagnostics are written to diagnostics/diagnostic_report.txt.
+
+The goal is to improve extraction while preserving the existing project. We are not creating a new project.
+
+The final JSON structure should look like this:
+
+{
+  "example.tst": {
+    "procedures": [
+      {
+        "date_time": "2025-12-31 11:44:33.256",
+        "Dur": 203,
+        "Status": {
+          "success": ["01.001", "01.003"],
+          "failure": ["01.002"],
+          "suspend": ["01.005"],
+          "progress": ["01.004"]
+        },
+        "final_status": "Failure",
+        "final_status_reason": [
+          {
+            "01.002": "STEP description, failure explanation"
+          }
+        ],
+        "mode_executions": {
+          "auto": {
+            "date_time_status": [
+              {
+                "date_time": "2025-12-31 11:50:00.000",
+                "status": "Success"
+              }
+            ],
+            "success": ["01.003"],
+            "failure": [],
+            "progress": [],
+            "suspend": []
+          },
+          "manual": {
+            "success": ["01.001"],
+            "failure": ["01.002"],
+            "progress": ["01.004"],
+            "suspend": ["01.005"]
+          }
+        }
+      }
+    ]
+  },
+  "Insights": {
+    "Total PDFs read": 16,
+    "PDF names": ["example.pdf"],
+    "Total Pages read": 41818
+  }
+}
+
+The values above are illustrative; the actual output must come from the PDF.
+
+2. Requirements and decisions
+
+Mode separation: Auto and Manual STEP IDs must be assigned to their correct mode.
+
+Default mode: Each procedure starts in Manual mode until an Auto or Manual marker changes it.
+
+Mode markers: Mode information is taken from the STEP table, not from a mode-like variable in the procedure header.
+
+Auto timestamps: auto.date_time_status contains records for detected Auto mode starts.
+
+Manual timestamps: The planned structure omits manual.date_time_status.
+
+Status accuracy: A STEP marked Failure in the source must not silently become Success.
+
+Failure reasons: Preserve the STEP description and relevant continuation lines, such as CHECK IT AGAIN AND AGAIN.
+
+STEP extraction: Avoid returning 01.003: END when the source description is CHECK TM.
+
+Insights: Include PDF count, PDF names, and total pages.
+
+Output file: Future runs should overwrite one consistent file rather than creating a new timestamped file each time.
+
+Safety: Preserve the existing backup and avoid unrelated code changes.
+
+3. Latest pdf_parser.py currently shared
+
+The latest full pdf_parser.py is the version you pasted most recently in this conversation. It includes:
+
+STATUS_NAMES, MONTHS, STEP_ID_RE, MODE_LINE_RE, DATE_TIME_RE, DATE_RE, TIME_RE, DURATION_RE, STATUS_RE, and STATUS_SUFFIX_RE.
+
+normalize_procedure_name()
+
+normalize_datetime()
+
+split_procedure_blocks()
+
+extract_metadata()
+
+remove_date_time()
+
+is_mode_line()
+
+parse_mode_line()
+
+parse_step_row()
+
+extract_steps(block, include_modes=False)
+
+parse_pdf_text()
+
+validate_execution()
+
+Important latest implementation details:
+
+MODE_LINE_RE currently expects MODE and AUTO or MANUAL on the same line, with optional spaces, colon, or hyphen.
+
+extract_steps() begins in Manual mode and changes modes when it recognizes a mode line.
+
+Only recognized Auto markers add records to auto.date_time_status.
+
+A failed STEP's extra text is appended to its description.
+
+parse_pdf_text() returns Unknown if a STEP has an unrecognized status and there are no detected failures; this helps avoid silently claiming Success.
+
+mode_executions is included in each execution.
+
+Current problem: Despite these changes, Auto data is still appearing under Manual. The actual extracted text layout has not yet been inspected, so another parser replacement would be premature.
+
+4. Latest main.py currently shared
+
+The latest full main.py you pasted includes:
+
+PyMuPDF PDF reading through fitz.
+
+input/, output/, and diagnostics/ folder handling.
+
+read_pdf_text() for reading PDF pages.
+
+Grouping executions by normalized procedure name.
+
+A procedures list for each procedure-name group.
+
+mode_executions copied from each parser execution into the output.
+
+An Insights metadata object containing:
+
+Total PDFs read
+
+PDF names
+
+Total Pages read
+
+JSON writing and syntax verification.
+
+A diagnostic report with processing warnings, validation issues, and run statistics.
+
+The latest code still uses this timestamp-based output block:
+
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+output_filename = "output_" + timestamp + ".json"
+output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+This is the confirmed reason a new JSON file is created on every run.
+
+The existing JSON-writing section opens the output file in write mode, so using a fixed filename will overwrite that same file when writing succeeds.
+
+5. Outstanding problems
+
+Problem
+
+	
+
+Current status
+
+
+
+
+New JSON file created on each run
+
+	
+
+Cause identified; fix planned, not yet applied
+
+
+
+
+Auto STEP IDs appear under Manual
+
+	
+
+Unresolved; inspect extracted text
+
+
+
+
+Failure occasionally classified as Success
+
+	
+
+Safeguards exist, but accuracy still needs testing
+
+
+
+
+Failure explanations lose continuation lines
+
+	
+
+Unresolved; needs PDF comparison
+
+
+
+
+CHECK TM incorrectly becomes END
+
+	
+
+Unresolved; needs PDF comparison
+
+
+
+
+Final JSON structure and Insights
+
+	
+
+Implemented in the latest shared code, but output still needs validation
+
+
+
+
+100% extraction accuracy
+
+	
+
+Not established; requires comparison against source PDFs
+
+6. Exact next steps when work resumes
+Step 1 — Change the output filename
+
+In main.py, replace:
+
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+output_filename = "output_" + timestamp + ".json"
+output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+with:
+
+output_filename = "output.json"
+output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+Keep the existing JSON-writing and verification code unchanged.
+
+This changes the destination for future runs. It does not delete existing timestamped JSON files.
+
+Step 2 — Add temporary mode diagnostics
+
+At the top of main.py, add import re if it is not already present.
+
+Immediately after:
+
+full_text, page_count = read_pdf_text(pdf_path)
+total_pdfs_read += 1
+total_pages_read += page_count
+
+insert:
+
+mode_lines = full_text.splitlines()
+
+for line_number, line in enumerate(mode_lines):
+    if re.search(
+        r"\bMODE\b|\bAUTO\b|\bMANUAL\b",
+        line,
+        re.IGNORECASE
+    ):
+        start = max(0, line_number - 2)
+        end = min(len(mode_lines), line_number + 4)
+
+        diagnostics.append(
+            "MODE DEBUG - " + filename +
+            " - extracted lines " +
+            str(start + 1) + "-" + str(end)
+        )
+
+        for nearby_line in mode_lines[start:end]:
+            diagnostics.append(repr(nearby_line))
+
+This is a temporary diagnostic change. It records the extracted text around mode markers; it does not fix mode detection by itself.
+
+Step 3 — Run the project
+
+Run main.py using the existing project and PDF.
+
+Check:
+
+Whether the run completes.
+
+Whether output.json is created or overwritten.
+
+Whether Auto markers appear in the diagnostic report.
+
+Whether the markers are on one line or split across several lines.
+
+Step 4 — Fix the parser based on the diagnostic output
+
+Use the actual extracted text to determine why the Auto markers are missed. Do not keep making blind changes to the regular expressions.
+
+Step 5 — Verify the output against the PDF
+
+Check at least:
+
+One procedure containing both Auto and Manual.
+
+One STEP marked Failure.
+
+One failure with multiple description lines.
+
+One CHECK TM example.
+
+The JSON's overall structure and Insights.
+
+Do not treat syntactically valid JSON as proof that the data is correct.
+
+7. Important note about the latest code
+
+The latest full code provided in the conversation is the user's current pdf_parser.py and main.py as pasted in the last detailed code message. No later full-file replacement was shared.
+
+The two planned changes—the fixed output filename and temporary mode diagnostics—have not yet been confirmed as applied.
+
+This summary captures the project state and the next actions. For an exact copy of the complete current source files, use the full code you pasted earlier in this conversation; the summary intentionally does not reproduce hundreds of lines of code a second time, because that could introduce accidental differences.
