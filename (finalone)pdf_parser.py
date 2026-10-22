@@ -1,12 +1,14 @@
+
 # pdf_parser.py
-# Extract procedure and STEP information from the PDF text.
-# Compatible with Python 3.6.
+# Extract procedure and STEP information from PDF text.
+# Compatible with Python 3.6.5.
 
 import re
 from datetime import datetime
 
 
 STATUS_NAMES = ("success", "failure", "suspend", "progress")
+
 STATUS_TITLE = {
     "success": "Success",
     "failure": "Failure",
@@ -20,10 +22,11 @@ MONTHS = {
     "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
-# A valid STEP ID starts a row. 99.999 is intentionally not excluded here:
-# it is handled like a STEP because the agreed rule is to retain STEP rows.
 STEP_ID_RE = re.compile(r"^\s*(\d{2}\.\d{3,4})\b")
 MODE_RE = re.compile(r"^\s*MODE\b", re.IGNORECASE)
+OPERATING_MODE_RE = re.compile(
+    r"^\s*OPERATING\s+MODE\b", re.IGNORECASE
+)
 MODE_NAME_RE = re.compile(r"\b(AUTO|MANUAL)\b", re.IGNORECASE)
 
 DATE_RE = re.compile(
@@ -38,8 +41,12 @@ DATE_TIME_RE = re.compile(
     r"\s+(\d{1,2}):(\d{2}):(\d{2})[:.](\d{1,3})(?!\d)",
     re.IGNORECASE,
 )
-DURATION_RE = re.compile(r"\bDur\s*:\s*(\d+(?:\.\d+)?)\s*\(s\)", re.IGNORECASE)
-STATUS_WORD_RE = re.compile(r"\b(Success|Failure|Suspend|Progress)\b", re.IGNORECASE)
+DURATION_RE = re.compile(
+    r"\bDur\s*:\s*(\d+(?:\.\d+)?)\s*\(s\)", re.IGNORECASE
+)
+STATUS_WORD_RE = re.compile(
+    r"\b(Success|Failure|Suspend|Progress)\b", re.IGNORECASE
+)
 SEPARATOR_RE = re.compile(r"^[\s\-_=*|]+$")
 
 
@@ -49,7 +56,7 @@ def normalize_procedure_name(name):
 
 
 def normalize_datetime(value):
-    """Convert a supported date/time string to YYYY-MM-DD HH:MM:SS.mmm."""
+    """Convert a supported date/time to YYYY-MM-DD HH:MM:SS.mmm."""
     match = DATE_TIME_RE.search(value or "")
     if not match:
         return None
@@ -80,10 +87,7 @@ def normalize_datetime(value):
 
 
 def _combine_split_date_time(lines):
-    """
-    Join a date at the end of one line and a time at the start of the next
-    line. This helps with the split timestamps visible in the sample PDF.
-    """
+    """Join dates and times that are split across adjacent lines."""
     combined = []
     index = 0
 
@@ -91,16 +95,21 @@ def _combine_split_date_time(lines):
         line = lines[index]
         date_match = DATE_RE.search(line)
 
-        if date_match and not DATE_TIME_RE.search(line) and index + 1 < len(lines):
+        if (
+            date_match
+            and not DATE_TIME_RE.search(line)
+            and index + 1 < len(lines)
+        ):
             next_line = lines[index + 1]
             time_match = TIME_RE.search(next_line)
+
             if time_match:
-                before_date = line[:date_match.start()]
-                date_text = date_match.group(0)
-                time_text = time_match.group(0)
-                after_time = next_line[time_match.end():]
                 combined.append(
-                    before_date + date_text + " " + time_text + after_time
+                    line[:date_match.start()]
+                    + date_match.group(0)
+                    + " "
+                    + time_match.group(0)
+                    + next_line[time_match.end():]
                 )
                 index += 2
                 continue
@@ -113,28 +122,32 @@ def _combine_split_date_time(lines):
 
 def split_procedure_blocks(text):
     """Split the document whenever a new Procedure: header begins."""
-    matches = list(re.finditer(r"\bProcedure\s*:", text or "", re.IGNORECASE))
+    matches = list(
+        re.finditer(r"\bProcedure\s*:", text or "", re.IGNORECASE)
+    )
     blocks = []
 
     for index, match in enumerate(matches):
         start = match.start()
-        if index + 1 < len(matches):
-            end = matches[index + 1].start()
-        else:
-            end = len(text)
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
         blocks.append(text[start:end])
 
     return blocks
 
 
 def extract_metadata(block):
-    """Read procedure name, header timestamp and duration."""
+    """Extract procedure name, timestamp, and rounded duration."""
     name_match = re.search(
         r"\bProcedure\s*:\s*(.*?)\s+\bTime\s*:",
         block,
         re.IGNORECASE | re.DOTALL,
     )
     name = ""
+
     if name_match:
         name = re.sub(r"\s+", " ", name_match.group(1)).strip()
 
@@ -145,37 +158,36 @@ def extract_metadata(block):
 
     duration_match = DURATION_RE.search(header)
     duration = None
+
     if duration_match:
-        # Python round() uses ties-to-even. The duration is non-negative;
-        # adding 0.5 gives the requested nearest-whole-number behavior.
         duration = int(float(duration_match.group(1)) + 0.5)
 
     return name, date_time, duration
 
 
 def _is_mode_start(line):
-    """Recognize a MODE marker, including MODE and AUTO on one line."""
+    """Recognize a MODE marker."""
     return bool(MODE_RE.match(line or ""))
 
 
 def _mode_name(lines):
-    """Find AUTO or MANUAL even when it is on the line after MODE."""
+    """Find AUTO or MANUAL in a MODE event."""
     saw_mode = False
+
     for line in lines:
         if _is_mode_start(line):
             saw_mode = True
+
         if saw_mode:
             match = MODE_NAME_RE.search(line)
             if match:
                 return match.group(1).lower()
+
     return None
 
 
 def _status_near_timestamp(lines):
-    """
-    Find the status associated with the timestamped part of a STEP/MODE row.
-    Words in the description before the timestamp are not considered.
-    """
+    """Find the status associated with a timestamp."""
     timestamp_seen = False
 
     for line in lines:
@@ -185,38 +197,30 @@ def _status_near_timestamp(lines):
         if date_match or time_match:
             timestamp_seen = True
 
-            # A status after the time on this same line is the strongest match.
             if time_match:
                 suffix = line[time_match.end():]
                 matches = list(STATUS_WORD_RE.finditer(suffix))
+
                 if matches:
                     return matches[-1].group(1).lower()
 
-            # If the timestamp is split across lines, status may be on a
-            # nearby line after the timestamp.
             continue
 
         if timestamp_seen:
-            stripped = line.strip()
-            standalone = re.match(
+            match = re.match(
                 r"^(Success|Failure|Suspend|Progress)\b",
-                stripped,
+                line.strip(),
                 re.IGNORECASE,
             )
-            if standalone:
-                return standalone.group(1).lower()
+
+            if match:
+                return match.group(1).lower()
 
     return None
 
 
 def _description_and_reason(step_lines, warnings, step_id):
-    """
-    Extract the STEP description and any continuation text.
-
-    The first timestamp separates the main description from later details.
-    Continuation lines are retained; the caller uses them in failure reasons
-    only when this STEP's actual status is Failure.
-    """
+    """Extract STEP description and continuation text."""
     lines = _combine_split_date_time(step_lines)
     description_parts = []
     detail_parts = []
@@ -224,10 +228,10 @@ def _description_and_reason(step_lines, warnings, step_id):
 
     for raw_line in lines:
         line = raw_line.strip()
+
         if not line or SEPARATOR_RE.fullmatch(line):
             continue
 
-        # Remove the STEP ID if it appears again in a continuation line.
         line = STEP_ID_RE.sub("", line).strip()
 
         date_match = DATE_RE.search(line)
@@ -236,6 +240,7 @@ def _description_and_reason(step_lines, warnings, step_id):
 
         if date_match:
             positions.append(date_match.start())
+
         if time_match:
             positions.append(time_match.start())
 
@@ -250,8 +255,6 @@ def _description_and_reason(step_lines, warnings, step_id):
                 else:
                     description_parts.append(before_timestamp)
 
-            # Text after the timestamp may contain the status and/or extra
-            # text. Remove the date/time and only the trailing status word.
             after_timestamp = DATE_TIME_RE.sub(" ", after_timestamp)
             after_timestamp = DATE_RE.sub(" ", after_timestamp)
             after_timestamp = TIME_RE.sub(" ", after_timestamp)
@@ -268,7 +271,6 @@ def _description_and_reason(step_lines, warnings, step_id):
             timestamp_seen = True
             continue
 
-        # A status on its own line is metadata, not explanation text.
         if re.match(
             r"^(Success|Failure|Suspend|Progress)\s*$",
             line,
@@ -281,8 +283,12 @@ def _description_and_reason(step_lines, warnings, step_id):
         else:
             description_parts.append(line)
 
-    description = re.sub(r"\s+", " ", " ".join(description_parts)).strip()
-    details = re.sub(r"\s+", " ", " ".join(detail_parts)).strip()
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+    details = re.sub(
+        r"\s+", " ", " ".join(detail_parts)
+    ).strip()
 
     if description and details:
         full_text = description + ", " + details
@@ -291,14 +297,15 @@ def _description_and_reason(step_lines, warnings, step_id):
 
     if not full_text:
         warnings.append(
-            "STEP " + step_id + " has no confidently extracted description."
+            "STEP " + step_id
+            + " has no confidently extracted description."
         )
 
     return description, details, full_text
 
 
 def _read_mode_event(mode_lines, warnings):
-    """Read timestamp and status from a MODE AUTO/MANUAL row."""
+    """Extract timestamp and status from a MODE event."""
     lines = _combine_split_date_time(mode_lines)
     date_time = normalize_datetime(" ".join(lines))
     status = _status_near_timestamp(lines)
@@ -319,7 +326,7 @@ def _new_status_lists():
 
 
 def _parse_procedure_steps(block, source_name, execution_number):
-    """Extract STEP rows and mode assignments from one procedure block."""
+    """Extract STEP rows and assign each row to its active mode."""
     warnings = []
     overall_status = _new_status_lists()
     mode_status = {
@@ -334,23 +341,69 @@ def _parse_procedure_steps(block, source_name, execution_number):
     table_started = False
     current_mode = "manual"
     rows = []
+
     current_step_id = None
     current_step_lines = []
+    current_step_switches_to_manual = False
+
     mode_lines = []
     waiting_for_split_mode_name = False
 
     def save_step():
+        """Save a STEP using the mode active when that STEP began."""
         if current_step_id is not None:
-            rows.append(("step", current_step_id, list(current_step_lines), current_mode))
+            rows.append((
+                current_step_id,
+                list(current_step_lines),
+                current_mode,
+            ))
+
+    def finish_step():
+        """Save a STEP before applying its SINGLE STEP mode change."""
+        nonlocal current_step_id
+        nonlocal current_step_lines
+        nonlocal current_step_switches_to_manual
+        nonlocal current_mode
+
+        save_step()
+
+        if current_step_switches_to_manual:
+            current_mode = "manual"
+
+        current_step_id = None
+        current_step_lines = []
+        current_step_switches_to_manual = False
 
     def save_mode():
+        """Save the current MODE event, if one exists."""
         if mode_lines:
             mode = _mode_name(mode_lines)
+
             if mode:
                 event = _read_mode_event(mode_lines, warnings)
+
                 if mode == "auto":
                     auto_date_time_status.append(event)
+
             mode_lines[:] = []
+
+    def start_step(step_match, line):
+        """Start a new STEP row."""
+        nonlocal current_step_id
+        nonlocal current_step_lines
+        nonlocal current_step_switches_to_manual
+
+        current_step_id = step_match.group(1)
+        remainder = line[step_match.end():].strip()
+        current_step_lines = [remainder] if remainder else []
+
+        current_step_switches_to_manual = bool(
+            re.search(
+                r"\bSINGLE\s+STEP\b",
+                remainder,
+                re.IGNORECASE,
+            )
+        )
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -360,68 +413,100 @@ def _parse_procedure_steps(block, source_name, execution_number):
                 table_started = True
             continue
 
-        # Handle a mode marker, including a line that contains only MODE.
+        # OPERATING MODE AUTO/MANUAL changes the mode for subsequent rows.
+        operating_match = OPERATING_MODE_RE.match(line)
+
+        if operating_match:
+            finish_step()
+            save_mode()
+
+            mode_match = MODE_NAME_RE.search(line[operating_match.end():])
+
+            if mode_match:
+                current_mode = mode_match.group(1).lower()
+
+            mode_lines = []
+            waiting_for_split_mode_name = False
+            continue
+
+        # MODE AUTO/MANUAL, including MODE and its name on separate lines.
         if _is_mode_start(line) or waiting_for_split_mode_name:
-            save_step()
-            current_step_id = None
-            current_step_lines = []
+            finish_step()
 
             if _is_mode_start(line):
                 save_mode()
                 mode_lines = [line]
                 mode_match = MODE_NAME_RE.search(line)
-                if not mode_match:
-                    waiting_for_split_mode_name = True
-                else:
-                    waiting_for_split_mode_name = False
+
+                if mode_match:
                     current_mode = mode_match.group(1).lower()
+                    waiting_for_split_mode_name = False
+                else:
+                    waiting_for_split_mode_name = True
+
             else:
                 mode_lines.append(line)
                 mode_match = MODE_NAME_RE.search(line)
+
                 if mode_match:
-                    waiting_for_split_mode_name = False
                     current_mode = mode_match.group(1).lower()
+                    waiting_for_split_mode_name = False
+
             continue
 
-        # If a mode row is being collected, retain its split timestamp/status
-        # lines until a new STEP or another MODE marker starts.
+        # Collect timestamp/status lines belonging to a MODE event.
         if mode_lines:
             step_match = STEP_ID_RE.match(line)
+
             if step_match:
                 save_mode()
-                current_step_id = step_match.group(1)
-                remainder = line[step_match.end():].strip()
-                current_step_lines = [remainder] if remainder else []
+                start_step(step_match, line)
                 continue
+
             mode_lines.append(line)
             continue
 
         step_match = STEP_ID_RE.match(line)
+
         if step_match:
-            save_step()
-            current_step_id = step_match.group(1)
-            remainder = line[step_match.end():].strip()
-            current_step_lines = [remainder] if remainder else []
+            finish_step()
+            start_step(step_match, line)
+
         elif current_step_id is not None:
             current_step_lines.append(line)
 
-    save_step()
+            # SINGLE STEP can also appear on a continuation line.
+            if re.search(
+                r"\bSINGLE\s+STEP\b",
+                line,
+                re.IGNORECASE,
+            ):
+                current_step_switches_to_manual = True
+
+    finish_step()
     save_mode()
 
-    for row_type, step_id, step_lines, step_mode in rows:
+    for step_id, step_lines, step_mode in rows:
         if step_id in seen_ids:
             warnings.append(
-                "Duplicate STEP ID " + step_id +
-                " found in " + source_name + ", execution " +
-                str(execution_number) + "; both occurrences are retained."
+                "Duplicate STEP ID " + step_id
+                + " found in " + source_name
+                + ", execution " + str(execution_number)
+                + "; both occurrences are retained."
             )
+
         seen_ids.add(step_id)
 
-        status = _status_near_timestamp(_combine_split_date_time(step_lines))
+        status = _status_near_timestamp(
+            _combine_split_date_time(step_lines)
+        )
+
         if status is None:
             warnings.append(
-                "STEP " + step_id + " has no confidently detected status in " +
-                source_name + ", execution " + str(execution_number) + "."
+                "STEP " + step_id
+                + " has no confidently detected status in "
+                + source_name + ", execution "
+                + str(execution_number) + "."
             )
             continue
 
@@ -455,19 +540,15 @@ def _parse_procedure_steps(block, source_name, execution_number):
 
 
 def parse_pdf_text(text, source_name="unknown PDF"):
-    """
-    Parse extracted text from one PDF.
-
-    Returns:
-        executions: list of procedure execution dictionaries
-        warnings: list of extraction issues that need checking
-    """
+    """Parse procedure executions from extracted PDF text."""
     executions = []
     warnings = []
     blocks = split_procedure_blocks(text or "")
 
     if not blocks:
-        warnings.append(source_name + ": no Procedure: headers were detected.")
+        warnings.append(
+            source_name + ": no Procedure: headers were detected."
+        )
         return executions, warnings
 
     for execution_number, block in enumerate(blocks, 1):
@@ -475,22 +556,24 @@ def parse_pdf_text(text, source_name="unknown PDF"):
 
         if not name:
             warnings.append(
-                source_name + ", execution " + str(execution_number) +
-                ": procedure name was not detected."
-            )
-        if not date_time:
-            warnings.append(
-                source_name + ", execution " + str(execution_number) +
-                ": procedure timestamp was not detected."
-            )
-        if duration is None:
-            warnings.append(
-                source_name + ", execution " + str(execution_number) +
-                ": duration was not detected."
+                source_name + ", execution " + str(execution_number)
+                + ": procedure name was not detected."
             )
 
-        status, failure_reasons, modes, row_warnings = _parse_procedure_steps(
-            block, source_name, execution_number
+        if not date_time:
+            warnings.append(
+                source_name + ", execution " + str(execution_number)
+                + ": procedure timestamp was not detected."
+            )
+
+        if duration is None:
+            warnings.append(
+                source_name + ", execution " + str(execution_number)
+                + ": duration was not detected."
+            )
+
+        status, failure_reasons, modes, row_warnings = (
+            _parse_procedure_steps(block, source_name, execution_number)
         )
         warnings.extend(row_warnings)
 
@@ -515,18 +598,25 @@ def parse_pdf_text(text, source_name="unknown PDF"):
 
 
 def validate_execution(execution):
-    """Return basic consistency problems for one parsed execution."""
+    """Return basic consistency problems for one execution."""
     issues = []
     status = execution.get("Status", {})
 
     for name in STATUS_NAMES:
         if not isinstance(status.get(name), list):
-            issues.append("Status key '" + name + "' is missing or invalid.")
+            issues.append(
+                "Status key '" + name + "' is missing or invalid."
+            )
 
     if status.get("failure") and execution.get("final_status") != "Failure":
-        issues.append("A failed STEP exists but final_status is not Failure.")
+        issues.append(
+            "A failed STEP exists but final_status is not Failure."
+        )
 
     if not status.get("failure") and execution.get("final_status") != "Success":
-        issues.append("No failed STEP exists but final_status is not Success.")
+        issues.append(
+            "No failed STEP exists but final_status is not Success."
+        )
 
     return issues
+    
