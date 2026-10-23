@@ -1,0 +1,141 @@
+TODAY'S FULL SUMMARY — DJANGO / co_utility.py
+
+Starting point:
+The existing Django project is on a college system, uses SQLite, and is being worked on in a Red Hat Linux / Colnet intranet environment. The exact Python version was uncertain initially, but the VS Code terminal reported Python 3.11.5. The user is not permitted to share the full project files; only the last code chunks for models.py and admin.py were shared.
+
+1. models.py — last shared code
+
+class project_ip_details(models.Model):
+    project_name = models.CharField(max_length=1000, blank=True)
+    ip_address = models.CharField(max_length=1000, blank=True)
+    username = models.CharField(max_length=1000, blank=True, default="samops")
+    project_password = models.CharField(max_length=1000, blank=True, default="123")
+
+Purpose understood:
+Store project name, remote IP address, username, and password field in a Django model backed by SQLite. The default credentials are only what appeared in the shared code; they have not been verified as real server credentials and should not be assumed safe for production.
+
+2. admin.py — last shared code as typed by the user
+
+class project_ip_detailsAdmin(admin.ModelAdmin):
+    list_display = [f.name for f in project_ip_details._meta.get_fields()][1:]
+    list_editable = [f.name for f in project_ip_details._meta.get_fields()][2:]
+    admin.site.register(project_ip_details, project_ip_detailsAdmin)
+
+The original message had formatting/spacing issues around the final registration line. The above is a readable representation, not a claim that the actual file was inspected or changed. The model is intended to appear in Django Admin, where project details can be managed. The website is accessed through an intranet IP and its /admin page.
+
+3. Main task for co_utility.py
+
+- This is a new file to be implemented; it was empty when the user opened it in VS Code.
+- It should receive/use the selected project's project name, IP address, username, and password from the Django application.
+- Connect to the authorized remote Linux system using SSH.
+- Follow the user's observed workflow:
+  ssh username@ip_address
+  enter password
+  pwd
+  cd exe
+  ls -lrt
+- Retrieve all filenames in the remote exe directory, regardless of extension, and return them together in ONE Python list.
+
+Example directory listing shared by the user:
+
+total 47468
+-rw-r--r--.1 samops samcs 12345 Jun 20 2024 testcase.tst
+-rw-r--r--.1 samops samcs 3455 Jun 23 2024 sample.sh
+-rw-r--r--.1 samops samcs 34 Jun 24 2024 testone.tmp'
+-rw-r--r--.1 samops samcs 156 Jun 25 2024 example.tst
+
+Required output example:
+
+procedure_names = [
+    "testcase.tst",
+    "sample.sh",
+    "testone.tmp'",
+    "example.tst"
+]
+
+These are illustrative names. Actual output must be taken from the remote directory. Return only filenames, not permissions, owner/group, sizes, dates, or other ls output. Do not restrict extensions. Preserve unusual filename characters, including the apostrophe in testone.tmp'. The list must contain all relevant filenames in one array/list, not separate lists. The user refers to these directory filenames as procedure names.
+
+4. Integration approach
+
+- Do not rewrite the entire Django project.
+- Keep code simple, understandable, and limited to what is needed.
+- Avoid unnecessary diagnostics or extra files.
+- Do not change models.py or admin.py unless integration proves a change is needed.
+- The exact Django view/function or other calling point for co_utility.py has not been identified yet. Full files cannot be shared, so work from the permitted snippets and details.
+- Python must use the environment of the existing Django project; Python version reported by VS Code was 3.11.5.
+- Database mentioned by the user: SQLite.
+- College environment is described as Red Hat Linux, secure Colnet/intranet, with a remote system containing the exe directory. Exact environment/network architecture is not yet confirmed.
+
+5. SSH and dependency checks performed in VS Code terminal
+
+Command:
+python3 --version
+
+Output:
+Python 3.11.5
+
+Command:
+python3 -m pip show paramiko
+
+Output:
+Package not found / Paramiko not found.
+
+The user prefers using already available tools/packages rather than installing packages because they were told packages are installed. No packages have been installed. No project files have been edited by these checks.
+
+Command:
+ssh -V
+
+Output:
+OpenSSH_8.7p1, OpenSSL 3.0.7 1 Nov 2022
+
+The user could not find a requirements.txt file in the project. It has not been established whether the project has pyproject.toml, Pipfile, a virtual environment, or another dependency configuration. These have not been checked/confirmed.
+
+6. Network connectivity check
+
+The user tried:
+ssh -o BatchMode=yes username@ip_address
+
+They clarified that they had used their actual username and IP address rather than placeholders in their attempt. The result was:
+ssh: connect to username@ip_address port 22: No route to host
+
+They also ran:
+ping -c 4 YOUR_SERVER_IP
+
+using their actual IP instead of the placeholder, and reported:
+Destination Host Unreachable
+
+This indicates a network reachability/routing issue from the machine/environment where they ran the checks; it does NOT prove a Python or co_utility.py code error. The user says the server is on a secure Colnet network. We have not established whether their current VS Code machine is the same machine/network where their original SSH workflow worked. No network/firewall settings have been changed.
+
+7. SSH implementation discussion
+
+- Paramiko was proposed initially as a Python SSH library, but it is not installed in the Python environment checked.
+- The alternative being considered is Python's standard-library subprocess module invoking the existing OpenSSH client. subprocess is built into Python and requires no additional package.
+- Important limitation: subprocess alone does not safely automate an interactive SSH password prompt. We must use a college-approved authentication method, such as configured SSH keys or an approved interactive workflow. Do not put passwords directly in source code or expose credentials in command-line arguments.
+- We should not assume SSH key authentication is configured. The user has not yet run ssh -V successfully followed by a successful connection; OpenSSH client is installed, but network connectivity failed.
+- We discussed a possible remote command using find, but it has not been validated on the target host. An example was:
+  cd exe && find . -maxdepth 1 -type f -printf '%f\n'
+  This assumes exe is relative to the SSH login directory and that remote GNU find supports -printf. It is NOT finalized code and should not be blindly used before confirming remote behavior. It is safer than parsing ls -lrt for filenames with spaces or unusual characters if supported.
+
+8. Current status
+
+- Requirements for the core task are understood.
+- No final implementation of co_utility.py has been established or tested.
+- No code has been integrated with Django.
+- No project code or database migrations have been changed during today's troubleshooting.
+- The immediate blocker is remote server reachability from the VS Code environment. The user decided to continue this later.
+
+9. Next steps when resuming
+
+1. Determine whether VS Code is running on the same Red Hat/Colnet machine/network where the original SSH connection worked, or a different machine/environment.
+2. Verify Colnet access, target IP, routing, and server availability with the college IT/network administrator if needed. Do not modify network/firewall settings without authorization.
+3. Once network access is confirmed, determine the allowed SSH authentication method and whether any existing approved libraries are available in the actual Django Python environment. Do not install packages without approval.
+4. Write the core co_utility.py function to connect, retrieve the filenames from the remote exe directory, and return a single Python list; handle connection/command failures clearly rather than silently returning an empty list.
+5. Identify how the existing Django application should call this function and pass the selected project details. Avoid unrelated changes.
+6. Test against the actual directory and compare the list to the observed filenames, including different extensions and unusual characters. Ensure the website receives the returned list.
+
+User preferences:
+Explain things step by step because the user is new to Linux/SSH and is working in VS Code. Keep code straightforward and human-readable, avoid unnecessary files and diagnostics, don't ask for the entire project files because the user is not allowed to share them, and don't install packages or change project files without explaining the reason. The user wants this summary to cover today's discussion only, not earlier unrelated PDF_to_JSON or Linux-cheatsheet work.
+
+Where we stopped
+
+The next time we continue, we should start by resolving the SSH/network connection issue, not by changing the Python code. After the connection works, we'll implement co_utility.py and then integrate it with Django carefully.
