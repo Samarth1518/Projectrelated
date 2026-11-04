@@ -1,0 +1,1965 @@
+dashboard.py
+
+
+# dashboard.py
+# Dashboard processing logic
+# Compatible with Python 3.6.5
+
+import json
+import os
+import re
+import difflib
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SUBSYSTEM_FILE = os.path.join(BASE_DIR, "subsystems.json")
+
+SIMILARITY_THRESHOLD = 0.90
+
+
+# --------------------------------------------------
+# 1. NORMALIZE FILENAMES
+# --------------------------------------------------
+
+def normalize_name(name):
+    """Normalize filenames for comparison."""
+
+    name = os.path.basename(str(name)).strip().lower()
+    name = re.sub(r"\s+", "", name)
+
+    return name
+
+
+# --------------------------------------------------
+# 2. CALCULATE SIMILARITY
+# --------------------------------------------------
+
+def similarity_score(name1, name2):
+
+    first = normalize_name(name1)
+    second = normalize_name(name2)
+
+    return difflib.SequenceMatcher(
+        None, first, second
+    ).ratio()
+
+
+# --------------------------------------------------
+# 3. PARSE DATE AND TIME
+# --------------------------------------------------
+
+def parse_datetime(value):
+    """Parse execution date and time."""
+
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for date_format in formats:
+
+        try:
+            return datetime.strptime(
+                str(value).strip(),
+                date_format
+            )
+
+        except (ValueError, TypeError):
+            continue
+
+    return None
+
+
+# --------------------------------------------------
+# 4. LOAD SUBSYSTEM CONFIGURATION
+# --------------------------------------------------
+
+def load_subsystems():
+
+    with open(SUBSYSTEM_FILE, "r") as file:
+        return json.load(file)
+
+
+# --------------------------------------------------
+# 5. FIND BEST PROCEDURE MATCH
+# --------------------------------------------------
+
+def find_best_match(target_name, json_names):
+    """
+    Match configured filenames against JSON filenames.
+
+    Exact matching is preferred.
+    Otherwise, similarity must be at least 90%.
+    Equally scoring matches are treated as ambiguous.
+    """
+
+    target = normalize_name(target_name)
+
+    # Exact / case-insensitive matching.
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) == 1:
+        return exact_matches[0], "exact"
+
+    if len(exact_matches) > 1:
+        return None, "ambiguous"
+
+    # Similarity matching.
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+        return None, "unmatched"
+
+    scored_matches.sort(
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    highest_score = scored_matches[0][1]
+
+    best_matches = [
+        item for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+    if len(best_matches) != 1:
+        return None, "ambiguous"
+
+    return best_matches[0][0], "similar"
+
+
+# --------------------------------------------------
+# 6. GET POSSIBLE AMBIGUOUS MATCHES
+# --------------------------------------------------
+
+def get_ambiguous_candidates(target_name, json_names):
+    """
+    Identify JSON filenames involved in an ambiguous match.
+
+    These candidates will not be incorrectly displayed
+    as unassigned procedures.
+    """
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) > 1:
+        return exact_matches
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+        return []
+
+    highest_score = max(
+        item[1] for item in scored_matches
+    )
+
+    return [
+        item[0] for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+
+# --------------------------------------------------
+# 7. FIND LATEST EXECUTION
+# --------------------------------------------------
+
+def get_latest_execution(procedure_data):
+    """
+    Find the latest execution using date_time.
+
+    mode_executions is ignored.
+    """
+
+    executions = procedure_data.get("procedures", [])
+
+    valid_executions = []
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time", "")
+        )
+
+        if execution_date is not None:
+
+            valid_executions.append(
+                (execution_date, execution)
+            )
+
+    if not valid_executions:
+        return None
+
+    valid_executions.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+    return valid_executions[0][1]
+
+
+# --------------------------------------------------
+# 8. CALCULATE OVERALL DATE RANGE
+# --------------------------------------------------
+
+def get_date_range(json_procedures):
+    """
+    Find the oldest and latest execution dates
+    across the entire generated JSON.
+    """
+
+    all_dates = []
+
+    for procedure_data in json_procedures.values():
+
+        executions = procedure_data.get(
+            "procedures", []
+        )
+
+        for execution in executions:
+
+            if not isinstance(execution, dict):
+                continue
+
+            execution_date = parse_datetime(
+                execution.get("date_time", "")
+            )
+
+            if execution_date is not None:
+                all_dates.append(execution_date)
+
+    if not all_dates:
+        return "Date range unavailable"
+
+    oldest_date = min(all_dates)
+    latest_date = max(all_dates)
+
+    return (
+        oldest_date.strftime("%d-%m-%Y")
+        + " to "
+        + latest_date.strftime("%d-%m-%Y")
+    )
+
+
+# --------------------------------------------------
+# 9. PROCESS DASHBOARD
+# --------------------------------------------------
+
+def process_dashboard(json_path, project_name=""):
+    """
+    Process generated JSON and prepare dashboard data.
+
+    Returns:
+        project_name
+        date_range
+        subsystems
+        unassigned_procedures
+    """
+
+    subsystems = load_subsystems()
+
+    with open(json_path, "r") as json_file:
+        json_data = json.load(json_file)
+
+    # Ignore global Insights.
+
+    json_procedures = {
+        name: data
+        for name, data in json_data.items()
+        if name != "Insights"
+        and isinstance(data, dict)
+    }
+
+    json_names = list(json_procedures.keys())
+
+    # Calculate date range across ALL executions.
+
+    date_range = get_date_range(json_procedures)
+
+    results = []
+
+    # Successfully assigned JSON procedures.
+
+    assigned_names = set()
+
+    # JSON procedures involved in ambiguous matching.
+
+    reserved_names = set()
+
+    # Process every configured subsystem.
+
+    for subsystem_name, configured_names in subsystems.items():
+
+        success_names = []
+        failure_names = []
+        unmatched_names = []
+        ambiguous_names = []
+
+        for configured_name in configured_names:
+
+            matched_name, match_type = find_best_match(
+                configured_name,
+                json_names
+            )
+
+            # No unique matching procedure.
+
+            if matched_name is None:
+
+                if match_type == "ambiguous":
+
+                    ambiguous_names.append(configured_name)
+
+                    candidates = get_ambiguous_candidates(
+                        configured_name,
+                        json_names
+                    )
+
+                    reserved_names.update(candidates)
+
+                else:
+
+                    unmatched_names.append(configured_name)
+
+                continue
+
+            # Prevent assigning the same JSON procedure twice.
+
+            if matched_name in assigned_names:
+
+                ambiguous_names.append(configured_name)
+                reserved_names.add(matched_name)
+
+                continue
+
+            # Reserve the matched procedure.
+
+            assigned_names.add(matched_name)
+
+            # Get its latest execution.
+
+            latest = get_latest_execution(
+                json_procedures[matched_name]
+            )
+
+            if latest is None:
+
+                unmatched_names.append(configured_name)
+                continue
+
+            # Read latest final status.
+
+            final_status = str(
+                latest.get("final_status", "")
+            ).strip().lower()
+
+            if final_status == "success":
+
+                success_names.append(configured_name)
+
+            elif final_status == "failure":
+
+                failure_names.append(configured_name)
+
+            else:
+
+                unmatched_names.append(configured_name)
+
+        # Calculate subsystem counts.
+
+        success_count = len(success_names)
+        failure_count = len(failure_names)
+
+        total = success_count + failure_count
+
+        success_percentage = (
+            round(success_count * 100.0 / total, 2)
+            if total else 0
+        )
+
+        failure_percentage = (
+            round(failure_count * 100.0 / total, 2)
+            if total else 0
+        )
+
+        results.append({
+
+            "name": subsystem_name,
+
+            "success": success_names,
+            "failure": failure_names,
+
+            "unmatched": unmatched_names,
+            "ambiguous": ambiguous_names,
+
+            "success_count": success_count,
+            "failure_count": failure_count,
+
+            "unmatched_count": len(unmatched_names),
+            "ambiguous_count": len(ambiguous_names),
+
+            "total": total,
+
+            "success_percentage": success_percentage,
+            "failure_percentage": failure_percentage
+
+        })
+
+    # --------------------------------------------------
+    # 10. IDENTIFY UNASSIGNED PROCEDURES
+    # --------------------------------------------------
+
+    unassigned_success = []
+    unassigned_failure = []
+
+    for procedure_name, procedure_data in json_procedures.items():
+
+        # Skip already assigned or ambiguous candidates.
+
+        if procedure_name in assigned_names:
+            continue
+
+        if procedure_name in reserved_names:
+            continue
+
+        # Get latest execution.
+
+        latest = get_latest_execution(procedure_data)
+
+        if latest is None:
+            continue
+
+        final_status = str(
+            latest.get("final_status", "")
+        ).strip().lower()
+
+        # Separate Success and Failure.
+
+        if final_status == "success":
+
+            unassigned_success.append(procedure_name)
+
+        elif final_status == "failure":
+
+            unassigned_failure.append(procedure_name)
+
+    # --------------------------------------------------
+    # 11. RETURN FINAL DASHBOARD DATA
+    # --------------------------------------------------
+
+    unassigned_procedures = {
+
+        "success": unassigned_success,
+
+        "failure": unassigned_failure,
+
+        "success_count": len(unassigned_success),
+
+        "failure_count": len(unassigned_failure),
+
+        "total": (
+            len(unassigned_success)
+            + len(unassigned_failure)
+        )
+
+    }
+
+    return {
+
+
+        "project_name": project_name,
+
+        "date_range": date_range,
+
+        "subsystems": results,
+
+        "unassigned_procedures": unassigned_procedures
+
+    }
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+app.py
+
+
+# app.py
+# Flask application for Satellite Testing Dashboard
+# Compatible with Python 3.6.5
+
+import os
+import glob
+import subprocess
+import sys
+
+from flask import (
+    Flask,
+    render_template,
+    request,
+    flash
+)
+
+from werkzeug.utils import secure_filename
+
+from dashboard import process_dashboard
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+ALLOWED_EXTENSIONS = set(["pdf"])
+
+
+app = Flask(__name__)
+
+app.secret_key = "satellite_dashboard_local_key"
+
+
+# --------------------------------------------------
+# 1. CREATE REQUIRED FOLDERS
+# --------------------------------------------------
+
+def create_folders():
+
+    for folder in [INPUT_DIR, OUTPUT_DIR]:
+
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+
+# --------------------------------------------------
+# 2. CHECK FILE EXTENSION
+# --------------------------------------------------
+
+def allowed_file(filename):
+
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower()
+        in ALLOWED_EXTENSIONS
+    )
+
+
+# --------------------------------------------------
+# 3. GET LATEST GENERATED JSON
+# --------------------------------------------------
+
+def get_latest_json():
+
+    files = glob.glob(
+        os.path.join(OUTPUT_DIR, "output_*.json")
+    )
+
+    if not files:
+        return None
+
+    return max(
+        files,
+        key=os.path.getmtime
+    )
+
+
+# --------------------------------------------------
+# 4. CLEAR OLD INPUT PDF FILES
+# --------------------------------------------------
+
+def clear_old_input_pdfs():
+
+    for path in glob.glob(
+        os.path.join(INPUT_DIR, "*.pdf")
+    ):
+
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+# --------------------------------------------------
+# 5. RUN EXISTING PDF CONVERTER
+# --------------------------------------------------
+
+def run_pdf_converter():
+
+    main_path = os.path.join(
+        BASE_DIR,
+        "main.py"
+    )
+
+    result = subprocess.run(
+
+        [sys.executable, main_path],
+
+        cwd=BASE_DIR,
+
+        stdout=subprocess.PIPE,
+
+        stderr=subprocess.PIPE,
+
+        universal_newlines=True
+    )
+
+    if result.returncode != 0:
+
+        error_message = (
+            result.stderr
+            or result.stdout
+            or "PDF conversion failed."
+        )
+
+        raise RuntimeError(error_message)
+
+    return result.stdout
+
+
+# --------------------------------------------------
+# 6. MAIN DASHBOARD ROUTE
+# --------------------------------------------------
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+
+    create_folders()
+
+    dashboard_data = None
+    project_name = ""
+
+    if request.method == "POST":
+
+        project_name = request.form.get(
+            "project_name", ""
+        ).strip()
+
+        uploaded_files = request.files.getlist(
+            "pdf_files"
+        )
+
+        # Validate project name.
+
+        if not project_name:
+
+            flash("Please enter a project name.")
+
+        else:
+
+            valid_files = [
+                file for file in uploaded_files
+                if file
+                and file.filename
+                and allowed_file(file.filename)
+            ]
+
+            if not valid_files:
+
+                flash("Please select at least one valid PDF file.")
+
+            else:
+
+                try:
+
+                    # Remove previous input PDFs.
+
+                    clear_old_input_pdfs()
+
+                    # Save uploaded PDFs.
+
+                    saved_count = 0
+
+                    for uploaded_file in valid_files:
+
+                        filename = secure_filename(
+                            uploaded_file.filename
+                        )
+
+                        if not filename:
+                            continue
+
+                        save_path = os.path.join(
+                            INPUT_DIR,
+                            filename
+                        )
+
+                        uploaded_file.save(save_path)
+
+                        saved_count += 1
+
+                    if saved_count == 0:
+
+                        raise RuntimeError(
+                            "No valid PDF files could be saved."
+                        )
+
+                    # Execute existing converter.
+
+                    converter_message = run_pdf_converter()
+
+                    # Locate generated JSON.
+
+                    json_path = get_latest_json()
+
+                    if json_path is None:
+
+                        raise RuntimeError(
+                            "The converter did not generate "
+                            "an output JSON file."
+                        )
+
+                    # Process JSON.
+
+                    dashboard_data = process_dashboard(
+                        json_path,
+                        project_name
+                    )
+
+                    flash(
+                        str(saved_count)
+                        + " PDF file(s) processed successfully."
+                    )
+
+                except Exception as error:
+
+                    flash(
+                        "Error: " + str(error)
+                    )
+
+    return render_template(
+
+        "index.html",
+
+        dashboard_data=dashboard_data,
+
+        project_name=project_name
+
+    )
+
+
+# --------------------------------------------------
+# 7. RUN APPLICATION
+# --------------------------------------------------
+
+if __name__ == "__main__":
+
+    create_folders()
+
+    print("=" * 50)
+    print("SATELLITE TESTING DASHBOARD")
+    print("=" * 50)
+
+    print(
+        "Open your browser at http://127.0.0.1:5000"
+    )
+
+    print("Press CTRL+C to stop the server.")
+
+    app.run(
+
+        host="127.0.0.1",
+
+        port=5000,
+
+        debug=False
+
+    )
+    
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+templates/index.html
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Satellite Testing Dashboard</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+
+    <script src="{{ url_for('static', filename='chart.min.js') }}"></script>
+
+</head>
+
+<body>
+
+<div class="page-container">
+
+    <!-- HEADER -->
+
+    <header class="header">
+
+        <div>
+            <h1>Satellite Testing Dashboard</h1>
+
+            <p>
+                Subsystem-wise testing status and analysis
+            </p>
+        </div>
+
+    </header>
+
+
+    <main>
+
+        <!-- PDF UPLOAD SECTION -->
+
+        <section class="upload-section">
+
+            <h2>Upload Test Reports</h2>
+
+            <p>
+                Enter the project name and upload PDF reports
+                to generate the subsystem testing dashboard.
+            </p>
+
+            <form method="POST"
+                  action="/"
+                  enctype="multipart/form-data">
+
+                <!-- PROJECT NAME -->
+
+                <div class="project-name-field">
+
+                    <label for="project_name">
+                        Project Name
+                    </label>
+
+                    <input type="text"
+                           id="project_name"
+                           name="project_name"
+                           placeholder="Enter project name"
+                           value="{{ project_name or '' }}"
+                           required>
+
+                </div>
+
+
+                <!-- PDF UPLOAD -->
+
+                <div class="upload-box">
+
+                    <input type="file"
+                           id="pdf_files"
+                           name="pdf_files"
+                           accept=".pdf"
+                           multiple
+                           required>
+
+                    <label for="pdf_files">
+                        Select PDF Files
+                    </label>
+
+                    <p id="file-names">
+                        No files selected
+                    </p>
+
+                </div>
+
+
+                <button type="submit"
+                        class="upload-button">
+
+                    Upload and Generate Dashboard
+
+                </button>
+
+            </form>
+
+
+            <!-- FLASH MESSAGES -->
+
+            {% with messages = get_flashed_messages() %}
+
+                {% if messages %}
+
+                    <div class="messages">
+
+                        {% for message in messages %}
+
+                            <p>{{ message }}</p>
+
+                        {% endfor %}
+
+                    </div>
+
+                {% endif %}
+
+            {% endwith %}
+
+        </section>
+
+
+        <!-- DASHBOARD -->
+
+        {% if dashboard_data is not none %}
+
+        <section class="dashboard-section">
+
+
+            <!-- PROJECT HEADING AND DATE -->
+
+            <div class="project-heading">
+
+                <div class="project-title">
+
+                    <h2>
+                        {{ dashboard_data.project_name }}
+                        Project Overview
+                    </h2>
+
+                    <p>
+                        Latest execution status for each
+                        configured procedure
+                    </p>
+
+                </div>
+
+
+                <div class="project-date">
+
+                    <span>Date:</span>
+
+                    <strong>
+                        {{ dashboard_data.date_range }}
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+            <!-- SUBSYSTEM GRAPH -->
+
+            <div class="section-heading">
+
+                <h2>Subsystem Testing Overview</h2>
+
+            </div>
+
+
+            <div class="legend">
+
+                <span>
+
+                    <span class="legend-color success-color"></span>
+
+                    Success
+
+                </span>
+
+
+                <span>
+
+                    <span class="legend-color failure-color"></span>
+
+                    Failure
+
+                </span>
+
+            </div>
+
+
+            <div class="chart-container">
+
+                <canvas id="subsystemChart"></canvas>
+
+            </div>
+
+
+            <!-- SUBSYSTEM DETAILS -->
+
+            <h2 class="details-heading">
+                Subsystem Details
+            </h2>
+
+
+            <div class="subsystem-grid">
+
+                {% for subsystem in dashboard_data.subsystems %}
+
+
+                <div class="subsystem-card">
+
+                    <h3>{{ subsystem.name }}</h3>
+
+
+                    <!-- SUCCESS COUNT -->
+
+                    <div class="status-row">
+
+                        <span class="success-text">
+                            Success
+                        </span>
+
+                        <strong>
+                            {{ subsystem.success_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <!-- FAILURE COUNT -->
+
+                    <div class="status-row">
+
+                        <span class="failure-text">
+                            Failure
+                        </span>
+
+                        <strong>
+                            {{ subsystem.failure_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <!-- UNMATCHED COUNT -->
+
+                    <div class="status-row">
+
+                        <span>Unmatched</span>
+
+                        <strong>
+                            {{ subsystem.unmatched_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <!-- AMBIGUOUS COUNT -->
+
+                    <div class="status-row">
+
+                        <span>Ambiguous</span>
+
+                        <strong>
+                            {{ subsystem.ambiguous_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <!-- PROCEDURE NAMES -->
+
+                    <details>
+
+                        <summary>
+                            View procedure names
+                        </summary>
+
+
+                        <h4>Successful procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.success %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Failed procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.failure %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Unmatched procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.unmatched %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Ambiguous procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.ambiguous %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+                    </details>
+
+                </div>
+
+
+                {% endfor %}
+
+            </div>
+
+
+            <!-- UNASSIGNED PROCEDURES CARD -->
+
+            <h2 class="details-heading">
+
+                Other Procedures
+
+            </h2>
+
+
+            <div class="unassigned-grid">
+
+                <div class="unassigned-card">
+
+                    <h3>Unassigned Procedures</h3>
+
+
+                    <!-- SUCCESS -->
+
+                    <div class="status-row">
+
+                        <span class="success-text">
+                            Success
+                        </span>
+
+                        <strong class="success-text">
+
+                            {{ dashboard_data.unassigned_procedures.success_count }}
+
+                        </strong>
+
+                    </div>
+
+
+                    <!-- FAILURE -->
+
+                    <div class="status-row">
+
+                        <span class="failure-text">
+                            Failure
+                        </span>
+
+                        <strong class="failure-text">
+
+                            {{ dashboard_data.unassigned_procedures.failure_count }}
+
+                        </strong>
+
+                    </div>
+
+
+                    <!-- VIEW PROCEDURE NAMES -->
+
+                    <details>
+
+                        <summary>
+                            View procedure names
+                        </summary>
+
+
+                        <h4>Successful procedures</h4>
+
+                        <ul>
+
+                            {% for name in dashboard_data.unassigned_procedures.success %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Failed procedures</h4>
+
+                        <ul>
+
+                            {% for name in dashboard_data.unassigned_procedures.failure %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+                    </details>
+
+                </div>
+
+            </div>
+
+
+        </section>
+
+        {% endif %}
+
+    </main>
+
+
+    <!-- FOOTER -->
+
+    <footer>
+
+        Satellite Testing Dashboard
+
+    </footer>
+
+</div>
+
+
+<!-- CHART GENERATION -->
+
+{% if dashboard_data is not none %}
+
+<script>
+
+    const dashboardData =
+        {{ dashboard_data.subsystems | tojson }};
+
+
+    const labels = dashboardData.map(
+        item => item.name
+    );
+
+
+    const successCounts = dashboardData.map(
+        item => item.success_count
+    );
+
+
+    const failureCounts = dashboardData.map(
+        item => item.failure_count
+    );
+
+
+    const successNames = dashboardData.map(
+        item => item.success
+    );
+
+
+    const failureNames = dashboardData.map(
+        item => item.failure
+    );
+
+
+    const ctx = document.getElementById(
+        'subsystemChart'
+    ).getContext('2d');
+
+
+    new Chart(ctx, {
+
+        type: 'bar',
+
+        data: {
+
+            labels: labels,
+
+            datasets: [
+
+                {
+
+                    label: 'Success',
+
+                    data: successCounts,
+
+                    backgroundColor: '#269B59',
+
+                    successNames: successNames
+
+                },
+
+                {
+
+                    label: 'Failure',
+
+                    data: failureCounts,
+
+                    backgroundColor: '#D94B4B',
+
+                    failureNames: failureNames
+
+                }
+
+            ]
+
+        },
+
+
+        options: {
+
+            responsive: true,
+
+            maintainAspectRatio: false,
+
+
+            scales: {
+
+                x: {
+
+                    stacked: true,
+
+                    title: {
+
+                        display: true,
+
+                        text: 'Subsystems'
+
+                    }
+
+                },
+
+
+                y: {
+
+                    stacked: true,
+
+                    beginAtZero: true,
+
+                    ticks: {
+
+                        precision: 0
+
+                    },
+
+                    title: {
+
+                        display: true,
+
+                        text: 'Number of Procedures'
+
+                    }
+
+                }
+
+            },
+
+
+            plugins: {
+
+                legend: {
+
+                    position: 'top'
+
+                },
+
+
+                tooltip: {
+
+                    callbacks: {
+
+                        label: function(context) {
+
+                            const dataset = context.dataset;
+
+                            const count = context.raw;
+
+                            let names = [];
+
+
+                            if (dataset.label === 'Success') {
+
+                                names =
+                                    dataset.successNames[
+                                        context.dataIndex
+                                    ];
+
+                            }
+
+
+                            if (dataset.label === 'Failure') {
+
+                                names =
+                                    dataset.failureNames[
+                                        context.dataIndex
+                                    ];
+
+                            }
+
+
+                            let result = [
+
+                                dataset.label + ': ' + count
+
+                            ];
+
+
+                            names.forEach(function(name) {
+
+                                result.push('  ' + name);
+
+                            });
+
+
+                            return result;
+
+                        }
+
+                    }
+
+                },
+
+                datalabels: false
+
+            }
+
+        }
+
+    });
+
+</script>
+
+{% endif %}
+
+
+<!-- FILE SELECTION DISPLAY -->
+
+<script>
+
+    document.getElementById('pdf_files').addEventListener(
+
+        'change',
+
+        function() {
+
+            const files = this.files;
+
+            const display =
+                document.getElementById('file-names');
+
+
+            if (files.length === 0) {
+
+                display.textContent = 'No files selected';
+
+                return;
+
+            }
+
+
+            display.textContent =
+                files.length + ' PDF file(s) selected';
+
+        }
+
+    );
+
+</script>
+
+
+</body>
+
+</html>
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+static/style.css
+
+
+
+
+
+
+/* --------------------------------------------------
+   GLOBAL STYLES
+-------------------------------------------------- */
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+    color: #252525;
+    font-family: Arial, sans-serif;
+}
+
+.page-container {
+    width: 92%;
+    max-width: 1250px;
+    margin: auto;
+}
+
+
+/* --------------------------------------------------
+   HEADER
+-------------------------------------------------- */
+
+.header {
+    padding: 28px 0;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.header h1 {
+    margin: 0;
+    font-size: 28px;
+}
+
+.header p {
+    color: #777777;
+    margin-bottom: 0;
+}
+
+
+/* --------------------------------------------------
+   UPLOAD SECTION
+-------------------------------------------------- */
+
+.upload-section {
+    margin-top: 30px;
+    padding: 25px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+}
+
+.upload-section h2,
+.section-heading h2 {
+    margin-top: 0;
+}
+
+.upload-section p {
+    color: #666666;
+}
+
+
+/* --------------------------------------------------
+   PROJECT NAME INPUT
+-------------------------------------------------- */
+
+.project-name-field {
+    margin-top: 20px;
+    margin-bottom: 20px;
+}
+
+.project-name-field label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.project-name-field input {
+    width: 100%;
+    max-width: 450px;
+    padding: 12px;
+    border: 1px solid #cccccc;
+    border-radius: 5px;
+    font-size: 15px;
+}
+
+.project-name-field input:focus {
+    outline: none;
+    border-color: #2867b2;
+}
+
+
+/* --------------------------------------------------
+   PDF UPLOAD BOX
+-------------------------------------------------- */
+
+.upload-box {
+    padding: 25px;
+    margin-top: 20px;
+    text-align: center;
+    border: 2px dashed #cccccc;
+    border-radius: 8px;
+}
+
+.upload-box input {
+    display: block;
+    margin: 0 auto 15px;
+}
+
+.upload-box label {
+    display: inline-block;
+    padding: 10px 22px;
+    background: #eeeeee;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.upload-button {
+    margin-top: 20px;
+    padding: 12px 24px;
+    border: none;
+    border-radius: 5px;
+    background: #2867b2;
+    color: white;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+.upload-button:hover {
+    background: #174e91;
+}
+
+
+/* --------------------------------------------------
+   FLASH MESSAGES
+-------------------------------------------------- */
+
+.messages {
+    margin-top: 15px;
+    padding: 10px;
+    background: #f0f5fa;
+    border-radius: 5px;
+}
+
+
+/* --------------------------------------------------
+   DASHBOARD
+-------------------------------------------------- */
+
+.dashboard-section {
+    margin-top: 40px;
+}
+
+.section-heading p {
+    color: #777777;
+}
+
+
+/* --------------------------------------------------
+   PROJECT HEADING AND DATE
+-------------------------------------------------- */
+
+.project-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    margin-bottom: 35px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.project-title h2 {
+    margin-top: 0;
+    margin-bottom: 8px;
+    font-size: 25px;
+}
+
+.project-title p {
+    margin-bottom: 0;
+    color: #777777;
+}
+
+.project-date {
+    text-align: right;
+    padding-top: 5px;
+    min-width: 200px;
+}
+
+.project-date span {
+    display: block;
+    margin-bottom: 6px;
+    color: #777777;
+    font-size: 13px;
+}
+
+.project-date strong {
+    color: #333333;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+
+/* --------------------------------------------------
+   CHART LEGEND
+-------------------------------------------------- */
+
+.legend {
+    display: flex;
+    gap: 25px;
+    margin: 20px 0;
+}
+
+.legend span {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.legend-color {
+    width: 13px;
+    height: 13px;
+    display: inline-block;
+    border-radius: 3px;
+}
+
+.success-color {
+    background: #269B59;
+}
+
+.failure-color {
+    background: #D94B4B;
+}
+
+
+/* --------------------------------------------------
+   CHART CONTAINER
+-------------------------------------------------- */
+
+.chart-container {
+    position: relative;
+    width: 100%;
+    height: 430px;
+    padding: 20px;
+    border: 1px solid #eeeeee;
+    border-radius: 8px;
+}
+
+
+/* --------------------------------------------------
+   SUBSYSTEM DETAILS
+-------------------------------------------------- */
+
+.details-heading {
+    margin-top: 40px;
+}
+
+.subsystem-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+}
+
+.subsystem-card {
+    padding: 20px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.subsystem-card h3 {
+    margin-top: 0;
+}
+
+
+/* --------------------------------------------------
+   STATUS ROWS
+-------------------------------------------------- */
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 0;
+    border-bottom: 1px solid #eeeeee;
+}
+
+.success-text {
+    color: #269B59;
+}
+
+.failure-text {
+    color: #D94B4B;
+}
+
+
+/* --------------------------------------------------
+   PROCEDURE DETAILS
+-------------------------------------------------- */
+
+details {
+    margin-top: 15px;
+}
+
+summary {
+    cursor: pointer;
+    color: #2867b2;
+}
+
+details li {
+    margin-bottom: 6px;
+    overflow-wrap: anywhere;
+}
+
+
+/* --------------------------------------------------
+   UNASSIGNED PROCEDURES
+-------------------------------------------------- */
+
+.unassigned-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+}
+
+.unassigned-card {
+    padding: 20px;
+    border: 1px solid #dce3ed;
+    border-radius: 8px;
+    background: #f5f7fa;
+}
+
+.unassigned-card h3 {
+    margin-top: 0;
+    margin-bottom: 20px;
+    color: #303d50;
+}
+
+.unassigned-card .status-row {
+    border-bottom: 1px solid #e0e5ec;
+}
+
+.unassigned-card details {
+    margin-top: 18px;
+}
+
+.unassigned-card summary {
+    font-weight: 600;
+}
+
+.unassigned-card h4 {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    color: #444444;
+}
+
+
+/* --------------------------------------------------
+   FOOTER
+-------------------------------------------------- */
+
+footer {
+    margin-top: 50px;
+    padding: 20px 0;
+    border-top: 1px solid #eeeeee;
+    text-align: center;
+    color: #888888;
+}
+
+
+/* --------------------------------------------------
+   RESPONSIVE DESIGN
+-------------------------------------------------- */
+
+@media (max-width: 700px) {
+
+    .subsystem-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .unassigned-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .header h1 {
+        font-size: 23px;
+    }
+
+    .chart-container {
+        height: 350px;
+    }
+
+    .project-heading {
+        flex-direction: column;
+    }
+
+    .project-date {
+        text-align: left;
+        padding-top: 0;
+    }
+
+    .project-date strong {
+        white-space: normal;
+    }
+
+    .project-title h2 {
+        font-size: 22px;
+    }
+
+    .project-name-field input {
+        max-width: 100%;
+    }
+
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
