@@ -1,0 +1,1607 @@
+Updated dashboard.py
+
+
+
+
+# dashboard.py
+# Dashboard processing logic
+# Compatible with Python 3.6.5
+
+import json
+import os
+import re
+import difflib
+from datetime import datetime, date
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SUBSYSTEM_FILE = os.path.join(BASE_DIR, "subsystems.json")
+
+SIMILARITY_THRESHOLD = 0.90
+
+
+# --------------------------------------------------
+# 1. NORMALIZE FILENAMES
+# --------------------------------------------------
+
+def normalize_name(name):
+    """Normalize filenames for comparison."""
+
+    name = os.path.basename(str(name)).strip().lower()
+    name = re.sub(r"\s+", "", name)
+
+    return name
+
+
+# --------------------------------------------------
+# 2. CALCULATE SIMILARITY
+# --------------------------------------------------
+
+def similarity_score(name1, name2):
+
+    first = normalize_name(name1)
+    second = normalize_name(name2)
+
+    return difflib.SequenceMatcher(
+        None, first, second
+    ).ratio()
+
+
+# --------------------------------------------------
+# 3. PARSE DATE AND TIME
+# --------------------------------------------------
+
+def parse_datetime(value):
+    """Parse execution date and time."""
+
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for date_format in formats:
+
+        try:
+            return datetime.strptime(
+                str(value).strip(),
+                date_format
+            )
+
+        except (ValueError, TypeError):
+            continue
+
+    return None
+
+
+# --------------------------------------------------
+# 4. LOAD SUBSYSTEM CONFIGURATION
+# --------------------------------------------------
+
+def load_subsystems():
+
+    with open(SUBSYSTEM_FILE, "r") as file:
+        return json.load(file)
+
+
+# --------------------------------------------------
+# 5. FIND BEST PROCEDURE MATCH
+# --------------------------------------------------
+
+def find_best_match(target_name, json_names):
+    """
+    Exact matching is preferred.
+    Otherwise, similarity must be at least 90%.
+    Equally scoring matches are treated as ambiguous.
+    """
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) == 1:
+        return exact_matches[0], "exact"
+
+    if len(exact_matches) > 1:
+        return None, "ambiguous"
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+        return None, "unmatched"
+
+    scored_matches.sort(
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    highest_score = scored_matches[0][1]
+
+    best_matches = [
+        item for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+    if len(best_matches) != 1:
+        return None, "ambiguous"
+
+    return best_matches[0][0], "similar"
+
+
+# --------------------------------------------------
+# 6. GET POSSIBLE AMBIGUOUS MATCHES
+# --------------------------------------------------
+
+def get_ambiguous_candidates(target_name, json_names):
+    """
+    Identify JSON filenames involved in an ambiguous match.
+    """
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) > 1:
+        return exact_matches
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+        return []
+
+    highest_score = max(
+        item[1] for item in scored_matches
+    )
+
+    return [
+        item[0] for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+
+# --------------------------------------------------
+# 7. FILTER EXECUTIONS BY DATE
+# --------------------------------------------------
+
+def filter_executions_by_date(
+    executions,
+    date_filter="overall",
+    start_date=None,
+    end_date=None
+):
+    """
+    Filter execution records.
+
+    Overall:
+        Includes all valid dated executions.
+
+    Date Range:
+        Includes executions between start_date and end_date,
+        including both boundary dates.
+    """
+
+    filtered = []
+
+    start_datetime = None
+    end_datetime = None
+
+    if date_filter == "date_range":
+
+        if not start_date or not end_date:
+            raise ValueError(
+                "Both start date and end date are required."
+            )
+
+        try:
+            start_datetime = datetime.strptime(
+                str(start_date),
+                "%Y-%m-%d"
+            )
+
+            end_datetime = datetime.strptime(
+                str(end_date),
+                "%Y-%m-%d"
+            )
+
+        except ValueError:
+            raise ValueError(
+                "Invalid date format. Use YYYY-MM-DD."
+            )
+
+        if start_datetime > end_datetime:
+            raise ValueError(
+                "Start date cannot be later than end date."
+            )
+
+        # Include the complete end date.
+
+        end_datetime = end_datetime.replace(
+            hour=23,
+            minute=59,
+            second=59,
+            microsecond=999999
+        )
+
+    elif date_filter != "overall":
+
+        raise ValueError(
+            "Invalid date filter. Use overall or date_range."
+        )
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time", "")
+        )
+
+        if execution_date is None:
+            continue
+
+        if date_filter == "overall":
+
+            filtered.append(
+                (execution_date, execution)
+            )
+
+        elif (
+            start_datetime <= execution_date <= end_datetime
+        ):
+
+            filtered.append(
+                (execution_date, execution)
+            )
+
+    return filtered
+
+
+# --------------------------------------------------
+# 8. FIND LATEST EXECUTION
+# --------------------------------------------------
+
+def get_latest_execution(
+    procedure_data,
+    date_filter="overall",
+    start_date=None,
+    end_date=None
+):
+    """
+    Find the latest execution within the selected period.
+
+    Only the latest matching execution is returned.
+    """
+
+    executions = procedure_data.get(
+        "procedures", []
+    )
+
+    filtered_executions = filter_executions_by_date(
+        executions,
+        date_filter,
+        start_date,
+        end_date
+    )
+
+    if not filtered_executions:
+        return None
+
+    filtered_executions.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+    return filtered_executions[0][1]
+
+
+# --------------------------------------------------
+# 9. CALCULATE DISPLAY DATE RANGE
+# --------------------------------------------------
+
+def get_date_range(
+    json_procedures,
+    date_filter="overall",
+    start_date=None,
+    end_date=None
+):
+    """
+    Calculate the date range represented by the dashboard.
+    """
+
+    all_dates = []
+
+    for procedure_data in json_procedures.values():
+
+        executions = procedure_data.get(
+            "procedures", []
+        )
+
+        filtered = filter_executions_by_date(
+            executions,
+            date_filter,
+            start_date,
+            end_date
+        )
+
+        for execution_date, execution in filtered:
+            all_dates.append(execution_date)
+
+    if not all_dates:
+        return "Date range unavailable"
+
+    oldest_date = min(all_dates)
+    latest_date = max(all_dates)
+
+    return (
+        oldest_date.strftime("%d-%m-%Y")
+        + " to "
+        + latest_date.strftime("%d-%m-%Y")
+    )
+
+
+# --------------------------------------------------
+# 10. PROCESS DASHBOARD
+# --------------------------------------------------
+
+def process_dashboard(
+    json_path,
+    project_name="",
+    date_filter="overall",
+    start_date=None,
+    end_date=None
+):
+    """
+    Process generated JSON and prepare dashboard data.
+
+    date_filter:
+        overall   - Latest execution across all dates.
+        date_range - Latest execution within selected dates.
+    """
+
+    # Validate date filter before processing.
+
+    if date_filter not in ("overall", "date_range"):
+        raise ValueError(
+            "Invalid date filter selected."
+        )
+
+    if date_filter == "date_range":
+
+        if not start_date or not end_date:
+            raise ValueError(
+                "Please select both start and end dates."
+            )
+
+        start_check = datetime.strptime(
+            str(start_date),
+            "%Y-%m-%d"
+        )
+
+        end_check = datetime.strptime(
+            str(end_date),
+            "%Y-%m-%d"
+        )
+
+        if start_check > end_check:
+            raise ValueError(
+                "Start date cannot be later than end date."
+            )
+
+    # Load subsystem configuration.
+
+    subsystems = load_subsystems()
+
+    # Load generated JSON.
+
+    with open(json_path, "r") as json_file:
+        json_data = json.load(json_file)
+
+    # Ignore global Insights.
+
+    json_procedures = {
+        name: data
+        for name, data in json_data.items()
+        if name != "Insights"
+        and isinstance(data, dict)
+    }
+
+    json_names = list(json_procedures.keys())
+
+    # Calculate date range for selected period.
+
+    date_range = get_date_range(
+        json_procedures,
+        date_filter,
+        start_date,
+        end_date
+    )
+
+    results = []
+
+    assigned_names = set()
+    reserved_names = set()
+
+    # --------------------------------------------------
+    # PROCESS EACH SUBSYSTEM
+    # --------------------------------------------------
+
+    for subsystem_name, configured_names in subsystems.items():
+
+        success_names = []
+        failure_names = []
+        unmatched_names = []
+        ambiguous_names = []
+
+        for configured_name in configured_names:
+
+            matched_name, match_type = find_best_match(
+                configured_name,
+                json_names
+            )
+
+            # No unique matching procedure.
+
+            if matched_name is None:
+
+                if match_type == "ambiguous":
+
+                    ambiguous_names.append(
+                        configured_name
+                    )
+
+                    candidates = get_ambiguous_candidates(
+                        configured_name,
+                        json_names
+                    )
+
+                    reserved_names.update(candidates)
+
+                else:
+
+                    unmatched_names.append(
+                        configured_name
+                    )
+
+                continue
+
+            # Prevent duplicate assignment.
+
+            if matched_name in assigned_names:
+
+                ambiguous_names.append(
+                    configured_name
+                )
+
+                reserved_names.add(matched_name)
+                continue
+
+            # Reserve matched JSON procedure.
+
+            assigned_names.add(matched_name)
+
+            # Get latest execution within selected period.
+
+            latest = get_latest_execution(
+                json_procedures[matched_name],
+                date_filter,
+                start_date,
+                end_date
+            )
+
+            if latest is None:
+
+                # Matched procedure exists, but has no execution
+                # in the selected date period.
+
+                unmatched_names.append(
+                    configured_name
+                )
+
+                continue
+
+            final_status = str(
+                latest.get("final_status", "")
+            ).strip().lower()
+
+            if final_status == "success":
+
+                success_names.append(
+                    configured_name
+                )
+
+            elif final_status == "failure":
+
+                failure_names.append(
+                    configured_name
+                )
+
+            else:
+
+                unmatched_names.append(
+                    configured_name
+                )
+
+        # Calculate subsystem counts.
+
+        success_count = len(success_names)
+        failure_count = len(failure_names)
+
+        total = success_count + failure_count
+
+        success_percentage = (
+            round(
+                success_count * 100.0 / total,
+                2
+            )
+            if total else 0
+        )
+
+        failure_percentage = (
+            round(
+                failure_count * 100.0 / total,
+                2
+            )
+            if total else 0
+        )
+
+        results.append({
+
+            "name": subsystem_name,
+
+            "success": success_names,
+            "failure": failure_names,
+
+            "unmatched": unmatched_names,
+            "ambiguous": ambiguous_names,
+
+            "success_count": success_count,
+            "failure_count": failure_count,
+
+            "unmatched_count": len(unmatched_names),
+            "ambiguous_count": len(ambiguous_names),
+
+            "total": total,
+
+            "success_percentage": success_percentage,
+            "failure_percentage": failure_percentage
+
+        })
+
+    # --------------------------------------------------
+    # 11. IDENTIFY UNASSIGNED PROCEDURES
+    # --------------------------------------------------
+
+    unassigned_success = []
+    unassigned_failure = []
+
+    for procedure_name, procedure_data in json_procedures.items():
+
+        # Skip assigned or ambiguous candidates.
+
+        if procedure_name in assigned_names:
+            continue
+
+        if procedure_name in reserved_names:
+            continue
+
+        # Get latest execution within selected period.
+
+        latest = get_latest_execution(
+            procedure_data,
+            date_filter,
+            start_date,
+            end_date
+        )
+
+        if latest is None:
+            continue
+
+        final_status = str(
+            latest.get("final_status", "")
+        ).strip().lower()
+
+        if final_status == "success":
+
+            unassigned_success.append(
+                procedure_name
+            )
+
+        elif final_status == "failure":
+
+            unassigned_failure.append(
+                procedure_name
+            )
+
+    # --------------------------------------------------
+    # 12. PREPARE UNASSIGNED PROCEDURES
+    # --------------------------------------------------
+
+    unassigned_procedures = {
+
+        "success": unassigned_success,
+
+        "failure": unassigned_failure,
+
+        "success_count": len(unassigned_success),
+
+        "failure_count": len(unassigned_failure),
+
+        "total": (
+            len(unassigned_success)
+            + len(unassigned_failure)
+        )
+
+    }
+
+    # --------------------------------------------------
+    # 13. RETURN FINAL DASHBOARD DATA
+    # --------------------------------------------------
+
+    return {
+
+        "project_name": project_name,
+
+        "date_range": date_range,
+
+        "date_filter": date_filter,
+
+        "start_date": start_date or "",
+
+        "end_date": end_date or "",
+
+        "subsystems": results,
+
+        "unassigned_procedures": unassigned_procedures
+
+    }
+    
+    
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Replace your entire app.py with this code
+
+
+
+
+# app.py
+# Flask application for Satellite Testing Dashboard
+# Compatible with Python 3.6.5
+
+import os
+import glob
+import subprocess
+import sys
+
+from datetime import datetime
+
+from flask import (
+    Flask,
+    render_template,
+    request,
+    flash
+)
+
+from werkzeug.utils import secure_filename
+
+from dashboard import process_dashboard
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+ALLOWED_EXTENSIONS = set(["pdf"])
+
+
+app = Flask(__name__)
+
+app.secret_key = "satellite_dashboard_local_key"
+
+
+# --------------------------------------------------
+# 1. CREATE REQUIRED FOLDERS
+# --------------------------------------------------
+
+def create_folders():
+
+    for folder in [INPUT_DIR, OUTPUT_DIR]:
+
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+
+# --------------------------------------------------
+# 2. CHECK FILE EXTENSION
+# --------------------------------------------------
+
+def allowed_file(filename):
+
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower()
+        in ALLOWED_EXTENSIONS
+    )
+
+
+# --------------------------------------------------
+# 3. GET LATEST GENERATED JSON
+# --------------------------------------------------
+
+def get_latest_json():
+
+    files = glob.glob(
+        os.path.join(OUTPUT_DIR, "output_*.json")
+    )
+
+    if not files:
+        return None
+
+    return max(
+        files,
+        key=os.path.getmtime
+    )
+
+
+# --------------------------------------------------
+# 4. CLEAR OLD INPUT PDF FILES
+# --------------------------------------------------
+
+def clear_old_input_pdfs():
+
+    for path in glob.glob(
+        os.path.join(INPUT_DIR, "*.pdf")
+    ):
+
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+# --------------------------------------------------
+# 5. RUN EXISTING PDF CONVERTER
+# --------------------------------------------------
+
+def run_pdf_converter():
+
+    main_path = os.path.join(
+        BASE_DIR,
+        "main.py"
+    )
+
+    result = subprocess.run(
+
+        [sys.executable, main_path],
+
+        cwd=BASE_DIR,
+
+        stdout=subprocess.PIPE,
+
+        stderr=subprocess.PIPE,
+
+        universal_newlines=True
+    )
+
+    if result.returncode != 0:
+
+        error_message = (
+            result.stderr
+            or result.stdout
+            or "PDF conversion failed."
+        )
+
+        raise RuntimeError(error_message)
+
+    return result.stdout
+
+
+# --------------------------------------------------
+# 6. VALIDATE DATE FILTER
+# --------------------------------------------------
+
+def validate_date_selection(
+    date_filter,
+    start_date,
+    end_date
+):
+
+    if date_filter == "overall":
+
+        return
+
+    if date_filter != "date_range":
+
+        raise ValueError(
+            "Invalid date selection."
+        )
+
+    if not start_date or not end_date:
+
+        raise ValueError(
+            "Please select both start date and end date."
+        )
+
+    try:
+
+        start = datetime.strptime(
+            start_date,
+            "%Y-%m-%d"
+        )
+
+        end = datetime.strptime(
+            end_date,
+            "%Y-%m-%d"
+        )
+
+    except ValueError:
+
+        raise ValueError(
+            "Please provide valid start and end dates."
+        )
+
+    if start > end:
+
+        raise ValueError(
+            "Start date cannot be later than end date."
+        )
+
+
+# --------------------------------------------------
+# 7. MAIN DASHBOARD ROUTE
+# --------------------------------------------------
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+
+    create_folders()
+
+    dashboard_data = None
+    project_name = ""
+
+    date_filter = "overall"
+    start_date = ""
+    end_date = ""
+
+    if request.method == "POST":
+
+        project_name = request.form.get(
+            "project_name", ""
+        ).strip()
+
+        date_filter = request.form.get(
+            "date_filter", "overall"
+        ).strip()
+
+        start_date = request.form.get(
+            "start_date", ""
+        ).strip()
+
+        end_date = request.form.get(
+            "end_date", ""
+        ).strip()
+
+        uploaded_files = request.files.getlist(
+            "pdf_files"
+        )
+
+        try:
+
+            # Validate project name.
+
+            if not project_name:
+
+                raise ValueError(
+                    "Please enter a project name."
+                )
+
+            # Validate selected date option.
+
+            validate_date_selection(
+                date_filter,
+                start_date,
+                end_date
+            )
+
+            # Validate uploaded PDFs.
+
+            valid_files = [
+                file for file in uploaded_files
+                if file
+                and file.filename
+                and allowed_file(file.filename)
+            ]
+
+            if not valid_files:
+
+                raise ValueError(
+                    "Please select at least one valid PDF file."
+                )
+
+            # Remove previous input PDFs.
+
+            clear_old_input_pdfs()
+
+            # Save uploaded PDFs.
+
+            saved_count = 0
+
+            for uploaded_file in valid_files:
+
+                filename = secure_filename(
+                    uploaded_file.filename
+                )
+
+                if not filename:
+                    continue
+
+                save_path = os.path.join(
+                    INPUT_DIR,
+                    filename
+                )
+
+                uploaded_file.save(save_path)
+
+                saved_count += 1
+
+            if saved_count == 0:
+
+                raise RuntimeError(
+                    "No valid PDF files could be saved."
+                )
+
+            # Run existing PDF converter.
+
+            run_pdf_converter()
+
+            # Locate generated JSON.
+
+            json_path = get_latest_json()
+
+            if json_path is None:
+
+                raise RuntimeError(
+                    "The converter did not generate "
+                    "an output JSON file."
+                )
+
+            # Process dashboard with selected date filter.
+
+            dashboard_data = process_dashboard(
+
+                json_path,
+
+                project_name,
+
+                date_filter,
+
+                start_date if date_filter == "date_range" else None,
+
+                end_date if date_filter == "date_range" else None
+
+            )
+
+            flash(
+                str(saved_count)
+                + " PDF file(s) processed successfully."
+            )
+
+        except Exception as error:
+
+            flash(
+                "Error: " + str(error)
+            )
+
+    return render_template(
+
+        "index.html",
+
+        dashboard_data=dashboard_data,
+
+        project_name=project_name,
+
+        date_filter=date_filter,
+
+        start_date=start_date,
+
+        end_date=end_date
+
+    )
+
+
+# --------------------------------------------------
+# 8. RUN APPLICATION
+# --------------------------------------------------
+
+if __name__ == "__main__":
+
+    create_folders()
+
+    print("=" * 50)
+    print("SATELLITE TESTING DASHBOARD")
+    print("=" * 50)
+
+    print(
+        "Open your browser at http://127.0.0.1:5000"
+    )
+
+    print("Press CTRL+C to stop the server.")
+
+    app.run(
+
+        host="127.0.0.1",
+
+        port=5000,
+
+        debug=False
+
+    )
+    
+    
+    
+    
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+new updated dashboard.py   
+
+
+
+# dashboard.py
+# Dashboard processing logic
+# Compatible with Python 3.6.5
+
+import json
+import os
+import re
+import difflib
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SUBSYSTEM_FILE = os.path.join(BASE_DIR, "subsystems.json")
+
+SIMILARITY_THRESHOLD = 0.90
+
+
+# --------------------------------------------------
+# 1. NORMALIZE FILENAMES
+# --------------------------------------------------
+
+def normalize_name(name):
+
+    name = os.path.basename(str(name)).strip().lower()
+    name = re.sub(r"\s+", "", name)
+
+    return name
+
+
+# --------------------------------------------------
+# 2. CALCULATE SIMILARITY
+# --------------------------------------------------
+
+def similarity_score(name1, name2):
+
+    first = normalize_name(name1)
+    second = normalize_name(name2)
+
+    return difflib.SequenceMatcher(
+        None, first, second
+    ).ratio()
+
+
+# --------------------------------------------------
+# 3. PARSE DATE AND TIME
+# --------------------------------------------------
+
+def parse_datetime(value):
+
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for date_format in formats:
+
+        try:
+            return datetime.strptime(
+                str(value).strip(),
+                date_format
+            )
+
+        except (ValueError, TypeError):
+            continue
+
+    return None
+
+
+# --------------------------------------------------
+# 4. LOAD SUBSYSTEM CONFIGURATION
+# --------------------------------------------------
+
+def load_subsystems():
+
+    with open(SUBSYSTEM_FILE, "r") as file:
+        return json.load(file)
+
+
+# --------------------------------------------------
+# 5. FIND BEST PROCEDURE MATCH
+# --------------------------------------------------
+
+def find_best_match(target_name, json_names):
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) == 1:
+        return exact_matches[0], "exact"
+
+    if len(exact_matches) > 1:
+        return None, "ambiguous"
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+        return None, "unmatched"
+
+    scored_matches.sort(
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    highest_score = scored_matches[0][1]
+
+    best_matches = [
+        item for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+    if len(best_matches) != 1:
+        return None, "ambiguous"
+
+    return best_matches[0][0], "similar"
+
+
+# --------------------------------------------------
+# 6. GET POSSIBLE AMBIGUOUS MATCHES
+# --------------------------------------------------
+
+def get_ambiguous_candidates(target_name, json_names):
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) > 1:
+        return exact_matches
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+        return []
+
+    highest_score = max(
+        item[1] for item in scored_matches
+    )
+
+    return [
+        item[0] for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+
+# --------------------------------------------------
+# 7. GET EXECUTIONS WITHIN SELECTED DATE RANGE
+# --------------------------------------------------
+
+def filter_executions(procedure_data, date_mode,
+                      start_date=None, end_date=None):
+
+    executions = procedure_data.get("procedures", [])
+
+    filtered = []
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time", "")
+        )
+
+        if execution_date is None:
+            continue
+
+        # OVERALL MODE
+
+        if date_mode == "overall":
+            filtered.append(execution)
+            continue
+
+        # DATE RANGE MODE
+
+        if date_mode == "range":
+
+            if execution_date.date() < start_date:
+                continue
+
+            if execution_date.date() > end_date:
+                continue
+
+            filtered.append(execution)
+
+    return filtered
+
+
+# --------------------------------------------------
+# 8. FIND LATEST EXECUTION
+# --------------------------------------------------
+
+def get_latest_execution(procedure_data):
+
+    executions = procedure_data.get("procedures", [])
+
+    valid_executions = []
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time", "")
+        )
+
+        if execution_date is not None:
+
+            valid_executions.append(
+                (execution_date, execution)
+            )
+
+    if not valid_executions:
+        return None
+
+    valid_executions.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+    return valid_executions[0][1]
+
+
+# --------------------------------------------------
+# 9. GET DATE RANGE
+# --------------------------------------------------
+
+def get_date_range(json_procedures):
+
+    all_dates = []
+
+    for procedure_data in json_procedures.values():
+
+        executions = procedure_data.get(
+            "procedures", []
+        )
+
+        for execution in executions:
+
+            if not isinstance(execution, dict):
+                continue
+
+            execution_date = parse_datetime(
+                execution.get("date_time", "")
+            )
+
+            if execution_date is not None:
+                all_dates.append(execution_date)
+
+    if not all_dates:
+        return "Date range unavailable"
+
+    oldest_date = min(all_dates)
+    latest_date = max(all_dates)
+
+    return (
+        oldest_date.strftime("%d-%m-%Y")
+        + " to "
+        + latest_date.strftime("%d-%m-%Y")
+    )
+
+
+# --------------------------------------------------
+# 10. PROCESS DASHBOARD
+# --------------------------------------------------
+
+def process_dashboard(json_path, project_name="",
+                      date_mode="overall",
+                      start_date=None, end_date=None):
+
+    subsystems = load_subsystems()
+
+    with open(json_path, "r") as json_file:
+        json_data = json.load(json_file)
+
+    json_procedures = {
+        name: data
+        for name, data in json_data.items()
+        if name != "Insights"
+        and isinstance(data, dict)
+    }
+
+    json_names = list(json_procedures.keys())
+
+    date_range = get_date_range(json_procedures)
+
+    results = []
+
+    assigned_names = set()
+    reserved_names = set()
+
+    # Process configured subsystems.
+
+    for subsystem_name, configured_names in subsystems.items():
+
+        success_names = []
+        failure_names = []
+        unmatched_names = []
+        ambiguous_names = []
+
+        for configured_name in configured_names:
+
+            matched_name, match_type = find_best_match(
+                configured_name,
+                json_names
+            )
+
+            if matched_name is None:
+
+                if match_type == "ambiguous":
+
+                    ambiguous_names.append(configured_name)
+
+                    candidates = get_ambiguous_candidates(
+                        configured_name,
+                        json_names
+                    )
+
+                    reserved_names.update(candidates)
+
+                else:
+
+                    unmatched_names.append(configured_name)
+
+                continue
+
+            if matched_name in assigned_names:
+
+                ambiguous_names.append(configured_name)
+                reserved_names.add(matched_name)
+
+                continue
+
+            assigned_names.add(matched_name)
+
+            # Apply selected date filter.
+
+            filtered_data = {
+                "procedures": filter_executions(
+                    json_procedures[matched_name],
+                    date_mode,
+                    start_date,
+                    end_date
+                )
+            }
+
+            latest = get_latest_execution(filtered_data)
+
+            if latest is None:
+
+                unmatched_names.append(configured_name)
+                continue
+
+            final_status = str(
+                latest.get("final_status", "")
+            ).strip().lower()
+
+            if final_status == "success":
+
+                success_names.append(configured_name)
+
+            elif final_status == "failure":
+
+                failure_names.append(configured_name)
+
+            else:
+
+                unmatched_names.append(configured_name)
+
+        success_count = len(success_names)
+        failure_count = len(failure_names)
+
+        total = success_count + failure_count
+
+        success_percentage = (
+            round(success_count * 100.0 / total, 2)
+            if total else 0
+        )
+
+        failure_percentage = (
+            round(failure_count * 100.0 / total, 2)
+            if total else 0
+        )
+
+        results.append({
+
+            "name": subsystem_name,
+
+            "success": success_names,
+            "failure": failure_names,
+
+            "unmatched": unmatched_names,
+            "ambiguous": ambiguous_names,
+
+            "success_count": success_count,
+            "failure_count": failure_count,
+
+            "unmatched_count": len(unmatched_names),
+            "ambiguous_count": len(ambiguous_names),
+
+            "total": total,
+
+            "success_percentage": success_percentage,
+            "failure_percentage": failure_percentage
+
+        })
+
+    # --------------------------------------------------
+    # 11. UNASSIGNED PROCEDURES
+    # --------------------------------------------------
+
+    unassigned_success = []
+    unassigned_failure = []
+
+    for procedure_name, procedure_data in json_procedures.items():
+
+        if procedure_name in assigned_names:
+            continue
+
+        if procedure_name in reserved_names:
+            continue
+
+        filtered_data = {
+            "procedures": filter_executions(
+                procedure_data,
+                date_mode,
+                start_date,
+                end_date
+            )
+        }
+
+        latest = get_latest_execution(filtered_data)
+
+        if latest is None:
+            continue
+
+        final_status = str(
+            latest.get("final_status", "")
+        ).strip().lower()
+
+        if final_status == "success":
+
+            unassigned_success.append(procedure_name)
+
+        elif final_status == "failure":
+
+            unassigned_failure.append(procedure_name)
+
+    unassigned_procedures = {
+
+        "success": unassigned_success,
+
+        "failure": unassigned_failure,
+
+        "success_count": len(unassigned_success),
+
+        "failure_count": len(unassigned_failure),
+
+        "total": (
+            len(unassigned_success)
+            + len(unassigned_failure)
+        )
+
+    }
+
+    # --------------------------------------------------
+    # 12. RETURN DASHBOARD DATA
+    # --------------------------------------------------
+
+    return {
+
+        "project_name": project_name,
+
+        "date_range": date_range,
+
+        "date_mode": date_mode,
+
+        "start_date": (
+            start_date.strftime("%d-%m-%Y")
+            if start_date else ""
+        ),
+
+        "end_date": (
+            end_date.strftime("%d-%m-%Y")
+            if end_date else ""
+        ),
+
+        "subsystems": results,
+
+        "unassigned_procedures": unassigned_procedures
+
+    }
+    
+    
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    
+    
+
+
+
