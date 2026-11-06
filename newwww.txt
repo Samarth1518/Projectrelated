@@ -1,0 +1,1687 @@
+last chat link ----   https://chatgpt.com/share/6aecce8f-4fec-83e8-9607-502238dc42dd
+
+
+full summary
+
+
+# SATELLITE TESTING DASHBOARD
+## Complete Project Summary, Technical Documentation and Implementation Roadmap
+
+**Project:** Satellite Testing Dashboard  
+**Development environment:** Windows, PyCharm / Command Prompt  
+**Current Python version:** Python 3.6.5  
+**Project type:** Rule-based PDF processing and subsystem-wise testing visualisation  
+**Current backend:** Flask  
+**Future deployment target:** Linux (Red Hat environment), Python 3.11.5 and Django  
+**AI integration:** None
+
+---
+
+# 1. PROJECT OVERVIEW
+
+The Satellite Testing Dashboard is a Python-based application designed to process satellite testing reports in PDF format, extract procedure execution information, organise the extracted information into JSON, compare the procedures against their respective subsystems, and display the results through an interactive web dashboard.
+
+The main purpose is to make satellite testing results easier to analyse and understand.
+
+Instead of manually checking large PDF reports and calculating subsystem-wise Success and Failure counts, the application automates the process.
+
+### Main objectives
+
+1. Upload multiple satellite testing PDF reports.
+2. Extract procedure names and execution information.
+3. Identify STEP IDs and their execution statuses.
+4. Convert the extracted information into a structured JSON file.
+5. Identify unique procedures and their execution histories.
+6. Match procedures against subsystem configurations.
+7. Determine the latest execution status.
+8. Calculate subsystem-wise Success and Failure counts.
+9. Display the results through an interactive dashboard.
+10. Show unmatched, ambiguous and unassigned procedures separately.
+
+The application is deterministic and rule-based. It does not depend on AI models or external AI APIs.
+
+---
+
+# 2. TECHNOLOGY STACK
+
+| Technology | Version / Details | Purpose |
+|---|---|---|
+| Python | 3.6.5 | Main programming language |
+| PyMuPDF | 1.18.18 | Extracting text from PDF reports |
+| Flask | Existing installed version | Backend web application |
+| HTML | Standard | Dashboard structure |
+| CSS | Standard | Dashboard styling |
+| JavaScript | Standard | Frontend interaction |
+| Chart.js | 3.9.1 | Interactive subsystem bar graph |
+| JSON | Standard | Storing extracted execution information |
+| difflib | Python standard library | Similarity-based procedure matching |
+| re | Python standard library | Regular-expression-based extraction |
+| os / glob | Python standard library | File and directory handling |
+| python-docx | 0.8.11 planned | Reading Word documents and tables |
+| datetime | Python standard library | Execution date and time processing |
+| time | Python standard library | Measuring execution time |
+
+### Important library distinction
+
+PyMuPDF is used for PDF processing. It cannot directly read `.docx` Word documents.
+
+For Word document support, the project requires `python-docx`.
+
+The planned document parser will use:
+- PyMuPDF for PDF subsystem configuration documents.
+- python-docx for DOCX subsystem configuration documents.
+
+Older `.doc` files are not directly supported by python-docx. They would require a separate conversion mechanism, such as LibreOffice, if support is eventually required.
+
+---
+
+# 3. PROJECT FOLDER STRUCTURE
+
+The existing project is organised approximately as follows:
+
+```text
+Satellite Testing Dashboard/
+│
+├── app.py
+├── main.py
+├── pdf_parser.py
+├── dashboard.py
+├── subsystems.json
+│
+├── input/
+│   └── Uploaded PDF test reports
+│
+├── output/
+│   └── Generated JSON files
+│
+├── templates/
+│   └── index.html
+│
+└── static/
+    ├── style.css
+    └── chart.min.js
+```
+
+A new file is planned:
+
+```text
+subsystem_parser.py
+```
+
+This will independently parse subsystem configuration documents and generate the subsystem mapping JSON.
+
+### Responsibility of each file
+
+**1. app.py**
+
+Main Flask application.
+
+Responsibilities:
+- Runs the web application.
+- Displays the upload interface.
+- Accepts project name and uploaded PDF files.
+- Saves uploaded files.
+- Calls the PDF-to-JSON converter.
+- Finds the generated JSON file.
+- Calls dashboard processing.
+- Passes dashboard information to the HTML template.
+- Displays messages and errors.
+
+**2. main.py**
+
+PDF-to-JSON conversion controller.
+
+Responsibilities:
+- Finds PDF files in the input folder.
+- Reads PDF pages using PyMuPDF.
+- Sends extracted text to `pdf_parser.py`.
+- Groups repeated executions under procedure names.
+- Calculates total PDF, page and execution counts.
+- Generates the consolidated JSON file.
+- Validates the generated JSON.
+- Prints execution statistics and processing time.
+
+**3. pdf_parser.py**
+
+Core PDF text parsing logic.
+
+Responsibilities:
+- Identifies procedure blocks.
+- Extracts procedure names.
+- Extracts execution date and time.
+- Extracts duration.
+- Identifies STEP IDs.
+- Extracts STEP descriptions and failure reasons.
+- Identifies Success, Failure, Suspend and Progress statuses.
+- Identifies AUTO and MANUAL modes.
+- Determines final execution status.
+
+**4. dashboard.py**
+
+Dashboard calculation and subsystem matching.
+
+Responsibilities:
+- Reads the generated JSON.
+- Reads subsystem configuration.
+- Normalises procedure names.
+- Performs exact and similarity-based matching.
+- Handles ambiguous and unmatched procedures.
+- Determines the latest execution.
+- Calculates subsystem-wise statistics.
+- Separates unassigned procedures.
+- Prepares data for the frontend.
+
+**5. templates/index.html**
+
+Frontend dashboard structure.
+
+Responsibilities:
+- Displays the project name.
+- Provides PDF upload controls.
+- Displays the execution date range.
+- Displays the subsystem chart.
+- Displays subsystem cards.
+- Shows procedure names and their classifications.
+- Displays unassigned procedures.
+
+**6. static/style.css**
+
+Controls the visual design of the dashboard, including:
+- Layout.
+- Colours.
+- Cards.
+- Buttons.
+- Upload section.
+- Chart container.
+- Responsive behaviour.
+
+**7. static/chart.min.js**
+
+Local Chart.js library used to render the dashboard graph.
+
+**8. subsystems.json**
+
+Currently stores subsystem names and their configured procedure filenames.
+
+At present, this file is maintained manually. The planned improvement is to populate it automatically from an uploaded subsystem configuration document.
+
+---
+
+# 4. EXISTING PDF-TO-JSON PROCESSING
+
+This is the main functionality already implemented and tested.
+
+### Processing workflow
+
+```text
+Multiple PDF Reports
+        |
+        v
+     main.py
+        |
+        v
+   PyMuPDF / fitz
+        |
+        v
+  Extract PDF Text
+        |
+        v
+   pdf_parser.py
+        |
+        v
+Extract Procedure Information
+        |
+        v
+Group Executions by Procedure
+        |
+        v
+Validate Extracted Data
+        |
+        v
+Generate Consolidated JSON
+```
+
+### 4.1 Reading PDF files
+
+The application reads all PDF files placed directly inside the `input/` folder.
+
+The PDF text extraction function reads pages one at a time.
+
+The relevant implementation uses:
+
+```python
+for page_number in range(page_count):
+    page = get_page(document, page_number)
+    page_text_parts.append(get_page_text(page) or "")
+    page_text_parts.append("\n")
+```
+
+This allows the application to extract text page by page while retaining the text sequence needed by the parser.
+
+The page boundary is preserved so that information continuing across pages can still be processed.
+
+### 4.2 Extracting procedure metadata
+
+The PDF reports contain information similar to:
+
+```text
+Procedure : abbnm
+Time: 31-dec-2025 11:44:13.103
+Mode: Manual
+Source: abbvdskh
+Dur: 203.96(s)
+Priority: Low
+```
+
+The parser extracts relevant information, including:
+
+- Procedure name.
+- Execution date and time.
+- Duration.
+- STEP ID.
+- STEP description.
+- STEP status.
+- Final execution status.
+- Failure reasons.
+- Operating mode information.
+
+Other metadata is not necessarily included in the final dashboard calculations.
+
+### 4.3 STEP ID extraction
+
+The parser identifies STEP IDs using a regular expression.
+
+```python
+STEP_ID_RE = re.compile(r"^\s*(\d{2}\.\d{3,4})\b")
+```
+
+Example:
+
+```text
+01.0001
+01.0002
+01.0003
+```
+
+### 4.4 Execution statuses
+
+Four STEP status categories are maintained:
+
+```python
+STATUS_NAMES = (
+    "success",
+    "failure",
+    "suspend",
+    "progress"
+)
+```
+
+These statuses are stored separately in the JSON.
+
+### 4.5 Final execution status
+
+The existing simplified final-status logic is:
+
+```python
+if status["failure"]:
+    final_status = "Failure"
+else:
+    final_status = "Success"
+```
+
+Therefore:
+- If at least one STEP has failed, the execution is classified as Failure.
+- If no failed STEP is detected, the execution is classified as Success.
+
+**Important:** Suspend and Progress STEP statuses do not independently cause the final execution to be classified as Failure. This is the existing behaviour and should be verified against the actual reporting requirements before changing it.
+
+---
+
+# 5. CONSOLIDATED JSON STRUCTURE
+
+The application groups all executions belonging to the same procedure under a single JSON key.
+
+For example:
+
+```json
+{
+    "example.tst": {
+        "procedures": [
+            {
+                "date_time": "2025-12-31 11:44:33.256",
+                "Dur": 203,
+                "Status": {
+                    "success": ["01.001", "01.003"],
+                    "failure": ["01.002"],
+                    "suspend": ["01.005"],
+                    "progress": ["01.004"]
+                },
+                "final_status": "Failure",
+                "final_status_reason": [
+                    {
+                        "01.002": "STEP description, failure explanation"
+                    }
+                ],
+                "mode_executions": {
+                    "auto": {
+                        "date_time_status": [
+                            {
+                                "date_time": "2025-12-31 11:50:00.000",
+                                "status": "Success"
+                            }
+                        ],
+                        "success": ["01.003"],
+                        "failure": [],
+                        "progress": [],
+                        "suspend": []
+                    },
+                    "manual": {
+                        "success": ["01.001"],
+                        "failure": ["01.002"],
+                        "progress": ["01.004"],
+                        "suspend": ["01.005"]
+                    }
+                }
+            }
+        ]
+    },
+    "Insights": {
+        "Total PDFs read": 16,
+        "PDF names": ["example.pdf"],
+        "Total Pages read": 41818
+    }
+}
+```
+
+This is an illustrative structure based on the format discussed in the project conversation.
+
+### Why procedures are grouped
+
+Suppose `example.tst` executes three times and `sample.tst` executes four times.
+
+The JSON contains:
+- `example.tst` with three execution records.
+- `sample.tst` with four execution records.
+
+The program counts these separately:
+
+| Metric | Count |
+|---|---:|
+| Procedure executions extracted | 7 |
+| Unique procedures present | 2 |
+
+### Code added to main.py
+
+The following logic was added after printing the total execution count:
+
+```python
+total_unique_procedures = len([
+    name for name in output_data.keys()
+    if name != "Insights"
+])
+
+print(
+    "Unique procedures present:",
+    total_unique_procedures
+)
+```
+
+This counts unique procedure keys rather than execution records.
+
+The existing grouping logic also normalises procedure names, so differences in capitalization and extra spaces are not treated as separate procedures.
+
+---
+
+# 6. TESTING COMPLETED AND VERIFIED RESULTS
+
+The project was successfully tested using five PDF reports.
+
+### Actual reported test output
+
+```text
+Conversion finished.
+
+PDFs read: 5
+Total pages read: 120
+Procedure executions extracted: 85
+Unique procedures present: 12
+Warnings raised: 0
+Output file: output/output_2026-11-05.json
+
+Total execution time: 12.45 seconds
+```
+
+### What this confirms
+
+| Test metric | Result |
+|---|---:|
+| PDFs processed | 5 |
+| Total pages read | 120 |
+| Procedure executions extracted | 85 |
+| Unique procedures present | 12 |
+| Warnings | 0 |
+| Processing time | 12.45 seconds |
+
+The existing PDF conversion and JSON generation were working correctly for this test batch.
+
+### Execution-time measurement
+
+The following code was added to `main.py`:
+
+At the top:
+
+```python
+import time
+```
+
+At the beginning of `main()`:
+
+```python
+def main():
+    start_time = time.time()
+```
+
+Before the final `return 0`:
+
+```python
+print(
+    "Total execution time:",
+    round(time.time() - start_time, 2),
+    "seconds"
+)
+```
+
+The measured execution time was 12.45 seconds.
+
+**Decision:** No performance optimisation is required immediately. The current performance is acceptable for the test performed. Further optimisation should be based on measurements with actual larger datasets.
+
+---
+
+# 7. EXISTING JSON FILE LOCK ISSUE
+
+One issue occurred during testing.
+
+When the previously generated JSON file was open in PyCharm, running the converter again sometimes produced a file-access error.
+
+Closing the JSON file allowed the converter to run successfully.
+
+The existing output logic:
+1. Writes a temporary JSON file.
+2. Validates the temporary JSON.
+3. Deletes previous generated output files.
+4. Renames the temporary file to the final output name.
+
+The relevant deletion logic is:
+
+```python
+def remove_old_generated_outputs():
+    pattern = os.path.join(OUTPUT_DIR, "output_*.json")
+
+    for path in glob.glob(pattern):
+        if os.path.isfile(path):
+            os.remove(path)
+```
+
+The user explicitly decided:
+
+- Do not redesign the output-saving mechanism.
+- Do not preserve previous generated JSON files as part of a new output workflow.
+- Keep the current output logic unchanged.
+- Close the previously generated JSON file before executing the converter again.
+
+This is a known operational limitation that should be explained when demonstrating the current version.
+
+No alternative file-lock solution was implemented in the discussed work.
+
+---
+
+# 8. SUBSYSTEM MATCHING MECHANISM
+
+This is one of the important parts of the dashboard.
+
+The application compares procedure filenames configured in `subsystems.json` with the procedure names extracted from the PDF reports.
+
+The matching logic uses Python's built-in `difflib` module.
+
+No additional installation is required.
+
+### 8.1 Filename normalisation
+
+The existing matching code uses logic similar to:
+
+```python
+def normalize_name(name):
+    name = os.path.basename(str(name)).strip().lower()
+    name = re.sub(r"\s+", "", name)
+    return name
+```
+
+This:
+- Removes directory paths.
+- Converts the name to lowercase.
+- Removes whitespace.
+
+Example:
+
+| Original | Normalised |
+|---|---|
+| Voltage_Test | voltage_test |
+| VOLTAGE_TEST | voltage_test |
+| Voltage Test | voltagetest |
+
+### 8.2 Exact matching
+
+The application first checks for an exact match after normalisation.
+
+```python
+exact_matches = [
+    name for name in json_names
+    if normalize_name(name) == target
+]
+```
+
+If a match is found, it is used without needing similarity matching.
+
+### 8.3 Similarity matching
+
+If exact matching fails, the program calculates similarity using:
+
+```python
+def similarity_score(name1, name2):
+    first = normalize_name(name1)
+    second = normalize_name(name2)
+
+    return difflib.SequenceMatcher(
+        None, first, second
+    ).ratio()
+```
+
+The similarity result is between 0 and 1.
+
+For example:
+- 1.00 = 100%
+- 0.95 = 95%
+- 0.90 = 90%
+- 0.89 = 89%
+
+### 8.4 Similarity threshold
+
+The configured threshold is:
+
+```python
+SIMILARITY_THRESHOLD = 0.90
+```
+
+The acceptance condition is:
+
+```python
+if score >= SIMILARITY_THRESHOLD:
+    scored_matches.append((name, score))
+```
+
+Therefore, a match must have at least 90% similarity to qualify.
+
+### 8.5 Selecting the best match
+
+Candidates are sorted by their similarity score:
+
+```python
+scored_matches.sort(
+    key=lambda item: item[1],
+    reverse=True
+)
+```
+
+The highest-scoring candidate is preferred.
+
+If multiple candidates share the same highest score, the system treats the match as ambiguous rather than guessing.
+
+### 8.6 Duplicate procedure names across subsystems
+
+The user confirmed that the existing duplicate-handling behaviour should remain unchanged.
+
+The current implementation uses:
+
+```python
+assigned_names = set()
+```
+
+If the same JSON procedure is already assigned to another subsystem, a later occurrence can be marked ambiguous.
+
+The first subsystem processed gets priority.
+
+Example:
+
+```json
+{
+    "Power_Subsystem": [
+        "Voltage_Test"
+    ],
+    "Communication_Subsystem": [
+        "Voltage_Test"
+    ]
+}
+```
+
+If the procedure is assigned to Power Subsystem first, its later occurrence under Communication Subsystem is treated as ambiguous.
+
+**Final decision:** Keep this behaviour. Do not allow duplicate assignments automatically or count the same procedure in both subsystems unless the user explicitly revisits this decision.
+
+### 8.7 Unmatched and ambiguous procedures
+
+- **Unmatched:** No reliable configured procedure match was found.
+- **Ambiguous:** Multiple candidates or a duplicate assignment prevent a confident match.
+- **Unassigned:** A procedure extracted from the PDF is not assigned to a configured subsystem.
+
+These should be shown separately rather than being counted as Failure.
+
+---
+
+# 9. EXISTING DASHBOARD REPRESENTATION
+
+The current dashboard is built using Flask, HTML, CSS and Chart.js.
+
+### Current upload section
+
+The existing upload page contains:
+1. Project Name input.
+2. Multiple PDF upload control.
+3. Upload and Generate Dashboard button.
+
+The project name is manually entered.
+
+It is used as the dashboard heading. It does not create separate project storage or historical project dashboards.
+
+### Current dashboard output
+
+The dashboard contains:
+
+**A. Main heading**
+- Satellite Testing Dashboard.
+- Project name.
+- Project Overview.
+
+**B. Date information**
+- Displays the execution date range derived from the generated JSON.
+
+**C. Subsystem Testing Overview**
+- Interactive stacked bar chart.
+- Success and Failure legend.
+- Subsystem names along the chart axis.
+- Procedure names can be displayed through chart hover information, as implemented in the existing dashboard.
+
+**D. Subsystem Details**
+
+Each subsystem is represented by a card showing:
+
+- Subsystem name.
+- Success count.
+- Failure count.
+- Unmatched count.
+- Ambiguous count.
+
+**E. Expandable procedure information**
+
+Each subsystem card includes a View procedure names section.
+
+It separates:
+- Successful procedures.
+- Failed procedures.
+- Unmatched procedures.
+- Ambiguous procedures.
+
+**F. Unassigned Procedures**
+
+Unassigned procedures are shown separately.
+
+They should not affect subsystem graph counts.
+
+The unassigned section also distinguishes successful and failed procedures.
+
+### Important existing dashboard behaviour
+
+The dashboard uses the latest execution status for each configured procedure.
+
+It does not simply count every historical execution as a separate current subsystem result.
+
+---
+
+# 10. TECHNOLOGY CAPACITY AND PERFORMANCE DISCUSSION
+
+The existing technology stack was reviewed for larger satellite test reports.
+
+The user stated that:
+- PDFs may contain more than 200 pages.
+- Reports contain selectable text.
+- The development machine has 32 GB RAM or more.
+- PyMuPDF 1.18.18 is being used.
+- Chart.js 3.9.1 is being used.
+
+### PyMuPDF
+
+PyMuPDF is used to extract text from PDF documents.
+
+The existing version is 1.18.18.
+
+It is an older version, but it successfully processed the test dataset.
+
+There is no universal fixed maximum number of PDFs or pages that can be processed. Actual capacity depends on:
+- PDF file sizes.
+- Number of pages.
+- Complexity of page layouts.
+- Amount of extracted text.
+- Available RAM.
+- Parser efficiency.
+- Operating system and hardware.
+
+The existing 120-page test taking 12.45 seconds is a useful baseline, not a guarantee for every future dataset.
+
+### Chart.js
+
+Chart.js 3.9.1 handles visualisation in the browser.
+
+It is separate from the PDF extraction process.
+
+The chart's practical limits depend mainly on the amount of data sent to the browser and how many chart elements are displayed.
+
+The existing subsystem-wise graph is relatively lightweight compared with processing very large PDF files.
+
+### Future deployment compatibility
+
+The future target is a Linux environment using Python 3.11.5 and Django.
+
+The current implementation should not be assumed to work unchanged on that system without testing.
+
+The plan is to:
+- Keep the current Python 3.6.5 environment working during development.
+- Test compatible dependency versions separately.
+- Keep PDF parsing and dashboard calculation logic independent of Flask-specific code where possible.
+- Reuse the same core processing logic when migrating to Django.
+
+---
+
+# 11. NEW MAJOR FEATURE: AUTOMATIC SUBSYSTEM CONFIGURATION PARSING
+
+This is the next major feature to implement.
+
+Currently, `subsystems.json` is manually maintained.
+
+The user wants the application to extract subsystem names and procedure filenames automatically from an uploaded Word or PDF document.
+
+The generated JSON will then be used by the existing dashboard matching logic.
+
+### 11.1 New input workflow
+
+The updated upload page should contain:
+
+1. Project Name.
+2. Test Report Files.
+3. Subsystem Configuration File.
+4. Date Selection.
+5. Generate Dashboard button.
+
+The test reports and subsystem configuration are separate uploads.
+
+### 11.2 Supported subsystem document formats
+
+The agreed formats to target are:
+
+- `.docx` Word documents.
+- Text-based `.pdf` documents.
+
+The older `.doc` format has not been confirmed as directly supported.
+
+### 11.3 Example subsystem document structure
+
+The document may look like:
+
+```text
+PROJECT NAME
+
+Subsystem: EXAMPLE
+
+SI No | Function | Filename | Time | ... | Remarks
+
+1     | Testing  | example.tst
+2     | Testing  | file.tst
+3     | Testing  | sample.tst
+4     | Testing  | (*) SEM
+```
+
+The actual table may have approximately 19 or more columns.
+
+Only the following information is relevant:
+
+- The main `Subsystem:` heading.
+- The `Filename` column.
+
+All other table columns should be ignored.
+
+### 11.4 Finding the Filename column
+
+The parser must identify the column by its header name.
+
+It must not assume that Filename is always in the third column.
+
+For example:
+- In one document, Filename might be the third column.
+- In another, it might be the fifth column.
+
+The parser should find the header named Filename and extract the cells belonging to that column.
+
+### 11.5 Subsystem identification
+
+Example:
+
+```text
+Subsystem: EXAMPLE
+```
+
+The parser should capture:
+
+```text
+EXAMPLE
+```
+
+The subsystem name should come from the main heading, not from other table columns.
+
+If multiple subsystem headings are present, each should be represented separately.
+
+If the same subsystem heading occurs more than once, its filename entries should be combined.
+
+### 11.6 Filename extraction requirements
+
+The Filename column may contain different formats.
+
+The parser must handle these examples:
+
+**Normal filenames**
+
+```text
+example.tst
+file.tst
+sample.tst
+```
+
+Expected:
+
+```text
+example.tst
+file.tst
+sample.tst
+```
+
+**Comma-separated values**
+
+```text
+example.tst, file.tst, sample.tst
+```
+
+Expected:
+
+```text
+example.tst
+file.tst
+sample.tst
+```
+
+**Split filename without extension**
+
+```text
+Hello-
+Xn1,
+Hello-
+Xn3
+```
+
+Expected:
+
+```text
+Hello-Xn1
+Hello-Xn3
+```
+
+**Split file extension**
+
+```text
+exe-
+hekllo.t
+st
+
+super.t
+st
+```
+
+Expected:
+
+```text
+exe-hekllo.tst
+super.tst
+```
+
+**Split prefix and extension**
+
+```text
+SO1-
+on.tst
+
+SO2-
+on.tst
+```
+
+Expected:
+
+```text
+SO1-on.tst
+SO2-on.tst
+```
+
+### 11.7 Additional filename rules
+
+The parser should:
+- Preserve original spelling and capitalization.
+- Support `.tst` and `.sh`.
+- Support filenames without extensions when appropriate.
+- Handle comma-separated entries.
+- Handle entries on separate lines.
+- Reconstruct filenames split across lines or cell fragments.
+- Ignore non-filename text such as `(*) SEM`.
+- Ignore unrelated remarks and descriptions.
+- Avoid joining unrelated filenames just because they are on consecutive lines.
+- Remove duplicate filenames within the same subsystem.
+
+The parser must use the actual document layout and table structure wherever possible. It should not simply join every consecutive line.
+
+### 11.8 Expected JSON
+
+For example:
+
+```json
+{
+    "EXAMPLE": [
+        "example.tst",
+        "file.tst",
+        "sample.tst",
+        "Hello-Xn1",
+        "Hello-Xn3",
+        "exe-hekllo.tst",
+        "super.tst",
+        "SO1-on.tst",
+        "SO2-on.tst"
+    ],
+    "POWER": [
+        "power.tst",
+        "voltage.tst"
+    ]
+}
+```
+
+This structure should remain compatible with the existing `dashboard.py` subsystem matching mechanism.
+
+---
+
+# 12. HOW subsystems.json SHOULD BE REPLACED
+
+The user initially requested that each new subsystem document should replace all previous subsystem data.
+
+This means:
+- A new upload should not merge with the previous configuration.
+- Old subsystem names and filenames should disappear after a successful replacement.
+- The new document should become the source of the current subsystem configuration.
+
+However, an important safety rule was subsequently agreed:
+
+**Preserve the previous valid `subsystems.json` if a newly uploaded document fails to parse or validate.**
+
+The agreed replacement process is:
+
+```text
+Upload Subsystem Document
+          |
+          v
+   Parse Document
+          |
+          v
+ Extract Subsystems
+          |
+          v
+ Extract Filenames
+          |
+          v
+    Validate Data
+          |
+          v
+ Create Temporary JSON
+          |
+          v
+ Validate Generated JSON
+          |
+          v
+ Replace subsystems.json
+```
+
+Validation should check:
+- At least one valid subsystem exists.
+- Subsystem names are not empty.
+- Each subsystem has a valid filename list.
+- Procedure names are not empty.
+- Duplicate filenames within a subsystem are removed.
+- The resulting JSON has the expected structure.
+
+If parsing fails, the existing valid `subsystems.json` must remain untouched.
+
+This gives the desired behaviour: a successful new upload completely replaces the old configuration, while a failed upload does not destroy working data.
+
+---
+
+# 13. NEW FEATURE: DATE FILTERING
+
+The dashboard upload page will include a date selection option.
+
+There will be two ways to generate the dashboard:
+
+1. Overall.
+2. Custom date range.
+
+### 13.1 Overall option
+
+Overall should be a selectable option.
+
+When selected:
+- All available execution records are considered.
+- The dashboard behaves like the current implementation.
+- The latest execution of each procedure is selected from the complete dataset.
+- The date displayed at the top-right is the oldest to latest valid execution date in the generated JSON.
+
+Overall should be the default selection.
+
+### 13.2 Custom date range
+
+The upload page will include:
+- Start Date.
+- End Date.
+
+The user can choose both dates.
+
+The dashboard will use only executions whose dates fall within the selected range.
+
+Both boundaries are inclusive.
+
+### 13.3 Same-day date selection
+
+The system must support:
+
+```text
+Start Date: 01-11-2024
+End Date:   01-11-2024
+```
+
+This should include every execution that occurred on 1 November 2024.
+
+### 13.4 Example
+
+Suppose the execution JSON contains:
+
+| Procedure | Execution date | Status |
+|---|---|---|
+| Example.tst | 01-11-2024 | Success |
+| Example.tst | 02-11-2024 | Failure |
+| Sample.tst | 03-11-2024 | Success |
+| Sample.tst | 05-11-2024 | Failure |
+
+**Scenario A: Overall**
+
+All executions are considered.
+
+Latest execution:
+- Example.tst → Failure.
+- Sample.tst → Failure.
+
+**Scenario B: 01-11-2024 to 03-11-2024**
+
+Only executions in that date range are considered.
+
+Latest execution within that range:
+- Example.tst → Failure.
+- Sample.tst → Success.
+
+**Scenario C: 01-11-2024 to 01-11-2024**
+
+Only executions on that date are considered.
+
+- Example.tst → Success.
+- Sample.tst → No execution in this range.
+
+### 13.5 No execution in the selected range
+
+A configured procedure may not have any execution during the selected period.
+
+It must not be automatically classified as Failure.
+
+The proposed display is:
+
+`No execution in this range`
+
+This is a separate condition and should not be counted as Success or Failure.
+
+The final presentation of this condition should be confirmed during implementation if necessary.
+
+### 13.6 Date range displayed on the dashboard
+
+For Overall:
+
+```text
+Date: Oldest execution date – Latest execution date
+```
+
+For a custom range:
+
+```text
+Date: Selected Start Date – Selected End Date
+```
+
+### 13.7 Date filtering must not affect subsystem configuration
+
+The date filter applies only to the execution JSON generated from the uploaded PDF reports.
+
+It does not apply to the subsystem configuration document.
+
+The subsystem document provides the procedure-to-subsystem mapping, independent of execution dates.
+
+The original execution JSON should not be permanently modified by filtering.
+
+---
+
+# 14. FINAL AGREED WORKFLOW
+
+The complete planned workflow is:
+
+```text
+                USER OPENS DASHBOARD
+                         |
+                         v
+                 ENTER PROJECT NAME
+                         |
+                         v
+              UPLOAD TEST REPORT PDFs
+                         |
+                         v
+          UPLOAD SUBSYSTEM CONFIGURATION
+                 DOCX OR TEXT PDF
+                         |
+                         v
+                  SELECT DATE MODE
+                  /             \
+             OVERALL          CUSTOM RANGE
+                  \             /
+                         |
+                         v
+                 CLICK GENERATE
+                         |
+          +--------------+--------------+
+          |                             |
+          v                             v
+    PDF REPORT PROCESSING       SUBSYSTEM DOCUMENT
+          |                        PROCESSING
+          v                             |
+       main.py                          v
+          |                    subsystem_parser.py
+          v                             |
+     pdf_parser.py                      v
+          |                     Extract subsystem
+          v                     names and filenames
+   Generate execution JSON              |
+          |                             v
+          |                     Validate configuration
+          |                             |
+          |                             v
+          |                    Replace subsystems.json
+          |                             |
+          +--------------+--------------+
+                         |
+                         v
+                 dashboard.py
+                         |
+                         v
+              Apply selected date range
+                         |
+                         v
+                Match procedure names
+                         |
+                         v
+               Select latest execution
+                         |
+                         v
+              Calculate subsystem status
+                         |
+                         v
+               Generate dashboard data
+                         |
+                         v
+                 DISPLAY DASHBOARD
+```
+
+The PDF conversion and subsystem configuration parsing are independent processing operations. Their results come together in the dashboard calculation stage.
+
+---
+
+# 15. IMPORTANT IMPLEMENTATION DECISIONS
+
+These decisions have already been discussed and should not be changed without a clear reason.
+
+| Area | Agreed decision |
+|---|---|
+| PDF uploads | Multiple PDFs supported |
+| PDF processing | All uploaded reports processed together |
+| JSON output | One consolidated execution JSON |
+| Procedure grouping | Group repeated executions under procedure names |
+| Unique procedure count | Count distinct procedure keys |
+| Final classification | Success / Failure |
+| STEP statuses | Success, Failure, Suspend, Progress |
+| Matching | Case-insensitive exact matching first |
+| Fuzzy matching | Python difflib |
+| Similarity threshold | 90% |
+| Ambiguous matches | Keep separate; do not guess |
+| Duplicate subsystem assignment | Keep current ambiguous handling |
+| Unmatched procedures | Show separately |
+| Unassigned procedures | Show separately |
+| Dashboard graph | Keep existing Chart.js implementation |
+| Project name | Entered manually |
+| Date mode | Overall or custom date range |
+| Date filtering | Applies only to execution JSON |
+| Subsystem source | Uploaded DOCX or supported PDF |
+| Filename extraction | Find the Filename column by its header |
+| Subsystem replacement | Replace old data after successful parsing and validation |
+| Failed subsystem upload | Preserve previous valid configuration |
+| PDF report download | Postponed; not part of current scope |
+| AI | Not required |
+| Existing PDF parser | Preserve working functionality |
+| Development Python | 3.6.5 |
+| Future target | Linux, Python 3.11.5 and Django |
+
+---
+
+# 16. LIBRARY INSTALLATION: CURRENT PROGRESS
+
+The new Word document parser requires `python-docx`.
+
+The user's current environment was checked.
+
+| Component | Reported result |
+|---|---|
+| Python | 3.6.5 |
+| pip | 20.3.3, running under Python 3.6 |
+| PyMuPDF | 1.18.18 |
+| python-docx | Not installed at the time of checking |
+
+The user downloaded and extracted the `python-docx-0.8.11` source folder.
+
+The user does not have Anaconda Prompt available, so the normal Windows Command Prompt is being used.
+
+The following installation procedure was provided.
+
+### Step 1: Open Command Prompt
+
+Press:
+
+```text
+Windows + R
+```
+
+Enter:
+
+```text
+cmd
+```
+
+Press Enter.
+
+### Step 2: Check Python and pip
+
+```bash
+python --version
+python -m pip --version
+```
+
+The pip output showed version 20.3.3 running under Python 3.6.
+
+### Step 3: Navigate to the extracted folder
+
+Use the actual extracted folder path:
+
+```bash
+cd /d "YOUR_FOLDER_PATH"
+```
+
+### Step 4: Check for setup.py
+
+```bash
+dir
+```
+
+The extracted folder should contain `setup.py`.
+
+### Step 5: Install from the extracted source folder
+
+```bash
+python -m pip install --no-deps .
+```
+
+### Step 6: Verify installation
+
+```bash
+python -c "import docx; print(docx.__version__)"
+```
+
+Expected:
+
+```text
+0.8.11
+```
+
+Then test:
+
+```bash
+python -c "from docx import Document; print('Word document reader working!')"
+```
+
+Expected:
+
+```text
+Word document reader working!
+```
+
+**Current stopping point:** The conversation ends after the user received these installation instructions. The successful installation of python-docx has not yet been confirmed. The exact command output and any dependency error are still pending.
+
+If an `lxml` dependency error appears, it needs to be handled before building the DOCX parser. Do not assume that installing the source package with `--no-deps` has installed all runtime dependencies.
+
+---
+
+# 17. FUTURE LINUX AND DJANGO COMPATIBILITY
+
+The future target environment discussed is a Linux computer, potentially Red Hat Enterprise Linux 8 or 9, using Python 3.11.5 and Django.
+
+The user also indicated that the target environment may be offline.
+
+The intended strategy is:
+
+1. Develop and test the feature on Windows first.
+2. Identify the exact dependencies required.
+3. Obtain compatible packages for the target Python version and architecture.
+4. Transfer the packages to the offline Linux system.
+5. Install dependencies locally.
+6. Test the parser and dashboard logic on Linux.
+7. Integrate the reusable core processing logic with Django.
+
+Previously requested system details that are still pending include:
+
+Windows:
+
+```bash
+python -c "import struct; print(struct.calcsize('P') * 8)"
+```
+
+Linux:
+
+```bash
+python3 --version
+uname -m
+cat /etc/redhat-release
+```
+
+These details are needed before selecting exact offline installation packages.
+
+The current Windows development should not be delayed by the future Linux migration. First get the parser working in the existing environment.
+
+---
+
+# 18. FEATURES NOT TO IMPLEMENT RIGHT NOW
+
+The following idea was discussed but explicitly postponed:
+
+**PDF report downloads.**
+
+The earlier idea included:
+- A full project PDF report.
+- Individual subsystem PDF reports.
+- An unassigned procedures PDF report.
+- The same graph as the website.
+- All procedure details and execution histories.
+- A reusable ReportLab module.
+
+However, the user later decided to leave this idea aside and focus on the major dashboard changes.
+
+Therefore, do not start implementing:
+- ReportLab.
+- PDF report-generation endpoints.
+- Full project report downloads.
+- Individual subsystem report downloads.
+
+Only revisit this if the user requests it again.
+
+---
+
+# 19. REMAINING IMPLEMENTATION ROADMAP
+
+The following order should be followed to avoid breaking the working dashboard.
+
+## Phase 1 – Complete python-docx installation
+
+- Continue from the current Command Prompt installation step.
+- Confirm the package version.
+- Resolve missing dependencies if any.
+- Test importing `Document`.
+
+## Phase 2 – Inspect the actual subsystem document
+
+The actual Word/PDF subsystem configuration document should be provided.
+
+Inspect:
+- Subsystem heading layout.
+- Table structure.
+- Filename header.
+- Filename column cell layout.
+- Split filename behaviour.
+- Page breaks and table continuation.
+- Whether headings and tables repeat across pages.
+
+Do not build the final extraction rules only from illustrative examples if the actual document is available.
+
+## Phase 3 – Build subsystem_parser.py
+
+Implement:
+- DOCX parsing.
+- Text-based PDF parsing.
+- Subsystem heading extraction.
+- Filename-column detection.
+- Filename extraction and reconstruction.
+- Duplicate removal.
+- Validation.
+- Safe JSON replacement.
+
+Test this parser independently before integrating it into Flask.
+
+## Phase 4 – Update app.py
+
+Add:
+- Test report upload handling.
+- Subsystem document upload handling.
+- Extension validation.
+- Safe file saving.
+- Subsystem parsing.
+- JSON generation and replacement.
+- Date mode and date range handling.
+- Dashboard processing.
+
+Preserve existing PDF conversion behaviour.
+
+## Phase 5 – Update templates/index.html
+
+Add the new input fields:
+
+```text
+Project Name
+
+Test Report Files
+[Upload multiple PDFs]
+
+Subsystem Configuration File
+[Upload DOCX or PDF]
+
+Date Selection
+( ) Overall
+( ) Custom Date Range
+
+Start Date
+End Date
+
+[Generate Dashboard]
+```
+
+The actual interface should remain consistent with the existing dashboard design.
+
+## Phase 6 – Update static/style.css
+
+Add styling for:
+- Two upload sections.
+- Date selection.
+- Start and End Date controls.
+- Overall option.
+- Generate button.
+- Responsive layout.
+
+## Phase 7 – Update dashboard.py
+
+Implement:
+- Overall date mode.
+- Custom date filtering.
+- Inclusive start and end dates.
+- Same-day date filtering.
+- Latest execution within the selected period.
+- No-execution-in-range handling.
+- Correct date display.
+
+Preserve the existing matching threshold and ambiguity logic.
+
+## Phase 8 – Full integration testing
+
+Test the following scenarios:
+
+1. One PDF and one subsystem document.
+2. Multiple PDFs and one subsystem document.
+3. Multiple subsystems.
+4. Multiple subsystem headings with the same name.
+5. Filename column in different positions.
+6. Comma-separated filenames.
+7. Filenames split across lines.
+8. Filenames split across table cells.
+9. Filenames without extensions.
+10. Duplicate filenames.
+11. Irrelevant entries such as `(*) SEM`.
+12. Overall date selection.
+13. Custom date range.
+14. Same-day date selection.
+15. Start date after end date.
+16. Procedures with no execution in the selected period.
+17. Unmatched procedures.
+18. Ambiguous procedures.
+19. Failed subsystem document parsing.
+20. Successful replacement of an existing subsystem configuration.
+
+Verify that the original PDF conversion and chart remain functional after integration.
+
+---
+
+# 20. IMPORTANT DEVELOPMENT RULES
+
+These rules are especially important when continuing the project.
+
+1. Do not rewrite all existing files unnecessarily.
+2. Inspect the actual current file before changing it.
+3. Preserve the working PDF-to-JSON parser.
+4. Preserve the existing JSON structure.
+5. Preserve the 90% matching mechanism.
+6. Preserve the existing ambiguous and duplicate-assignment behaviour.
+7. Do not classify unmatched or unassigned procedures as Failure.
+8. Do not modify the source execution JSON when applying a date filter.
+9. Do not replace a valid subsystem configuration with empty or invalid data.
+10. Ensure the code remains compatible with Python 3.6.5 during current development.
+11. Avoid introducing unnecessary dependencies.
+12. Test each new feature independently before integrating it.
+13. Give beginner-friendly, step-by-step instructions with exact filenames and code locations.
+14. Do not claim a feature is complete until it has actually been implemented and tested.
+
+---
+
+# 21. CURRENT PROJECT STATUS
+
+| Component / Feature | Current status |
+|---|---|
+| PDF upload | Implemented |
+| Multiple PDF processing | Implemented |
+| PyMuPDF text extraction | Implemented |
+| Procedure metadata extraction | Implemented |
+| STEP ID extraction | Implemented |
+| STEP status extraction | Implemented |
+| AUTO/MANUAL mode extraction | Implemented |
+| Final Success/Failure classification | Implemented |
+| Consolidated JSON generation | Implemented |
+| Execution history grouping | Implemented |
+| Unique procedure counting | Implemented and tested |
+| Execution-time measurement | Implemented and tested |
+| JSON output file locking issue | Known; existing behaviour intentionally retained |
+| Exact procedure matching | Implemented |
+| 90% similarity matching | Implemented |
+| Ambiguous matching | Implemented |
+| Unmatched and unassigned display | Implemented in the existing dashboard |
+| Chart.js subsystem graph | Implemented |
+| Subsystem cards and procedure lists | Implemented |
+| python-docx installation | In progress; success not yet confirmed |
+| Actual subsystem document inspection | Pending |
+| subsystem_parser.py | Pending |
+| Automatic subsystems.json generation | Pending |
+| Second upload option | Pending |
+| Overall/custom date selection | Pending |
+| Date filtering | Pending |
+| No execution in selected range | Planned |
+| Final integration testing | Pending |
+| PDF report downloads | Postponed |
+| Linux/Python 3.11.5/Django migration | Future work |
+
+---
+
+# 22. EXACT CONTINUATION POINT
+
+The last activity in the conversation was installing `python-docx` on the Windows development system.
+
+The user:
+- Downloaded `python-docx-0.8.11`.
+- Extracted the complete folder.
+- Opened normal Windows Command Prompt because Anaconda Prompt was unavailable.
+- Confirmed pip 20.3.3 was running under Python 3.6.
+- Obtained the folder path.
+- Received instructions to navigate to the extracted folder, check for `setup.py`, and install using:
+
+```bash
+python -m pip install --no-deps .
+```
+
+The next step is to ask for the actual output of that installation command and verify the package import.
+
+After that, continue with the actual subsystem document.
+
+**Do not ask the user to explain the entire project again.** The requirements, existing architecture, completed functionality, decisions and planned workflow are documented here.
+
+The immediate goal is to complete automatic subsystem document parsing first, then integrate it into the existing dashboard and implement the Overall/custom date filter.
+
+---
+
+## FINAL PROJECT UNDERSTANDING
+
+The Satellite Testing Dashboard already has a working foundation: multiple PDF reports can be processed, procedure executions are extracted and grouped into JSON, and the existing dashboard matches procedures against subsystem configurations using exact and 90% similarity matching.
+
+The next major development stage is to eliminate manual maintenance of `subsystems.json` by extracting subsystem names and filenames from an uploaded DOCX or text-based PDF document. The upload page will then support both report files and the subsystem configuration file, together with Overall or custom date filtering.
+
+The priority is to implement these additions without disturbing the working PDF parser, existing JSON structure, matching mechanism or dashboard representation.
+
+**This document is the master reference for continuing development of the Satellite Testing Dashboard.**
