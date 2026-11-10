@@ -1,58 +1,46 @@
-1. Expected project structure
+Don't worry! Let's stop changing things repeatedly. I'll give you the final file structure and complete code for each file, so you can follow it without confusion.
+
+We will complete the subsystem parser independently first. After that, we will connect it to your Flask dashboard so that users can upload the DOCX/PDF directly instead of placing it manually in the project folder.
+
+# STEP 1. Arrange your project folder
+
 Your project should look like this:
 
+```
 Satellite Testing Dashboard/
 │
 ├── app.py
 ├── main.py
-├── pdf_parser.py
 ├── dashboard.py
+├── pdf_parser.py
 │
-├── subsystem_parser.py          NEW
-├── test_subsystem_parser.py     NEW
-├── test_docx.py                 OLD TEST FILE
+├── subsystem_parser.py       <-- CREATE
+├── test_subsystem_parser.py  <-- CREATE
+├── test_docx.py              <-- Existing test
 │
-├── subsystem.docx
-├── subsystems.json              GENERATED
+├── subsystem.docx           <-- Your current DOCX
+├── subsystems.json          <-- Generated automatically
 │
 ├── templates/
 │   └── index.html
 │
 └── static/
     └── style.css
+```
 
+For now, keep `subsystem.docx` in the main project folder.
 
-2. Create subsystem_parser.py
+# STEP 2. Create `subsystem_parser.py`
 
-This is the main implementation.
+Create a new Python file named exactly:
 
-It will:
+`subsystem_parser.py`
 
-Read paragraphs and tables in document order.
+Copy this complete code into it.
 
-Identify all subsystem headings.
+Python
 
-Find the Filename column dynamically.
-
-Extract filenames from multiple tables.
-
-Combine repeated subsystem names.
-
-Reconstruct filenames split across lines.
-
-Filter .tst and .sh files.
-
-Remove duplicates.
-
-Generate subsystems.json.
-
-Preserve the previous JSON if parsing fails.
-
-Replace the contents of your new subsystem_parser.py with this complete code.
-
-
-code ------------
-
+```
 import os
 import re
 import json
@@ -65,51 +53,39 @@ from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 
 
-# --------------------------------------------------
-# 1. NORMALIZE TABLE HEADERS
-# --------------------------------------------------
-
 def normalize_header(value):
     return re.sub(r"[\s.]+", "", value).lower()
 
 
-# --------------------------------------------------
-# 2. VALIDATE FILENAMES
-# --------------------------------------------------
+def is_valid_filename(value):
 
-def is_valid_filename(filename):
-    """
-    Accept only .tst and .sh files.
-    """
+    value = value.strip()
 
-    filename = filename.strip()
-
-    if not filename:
+    if not value:
         return False
 
-    # Reject explanatory text and special markers.
-    if "(" in filename or ")" in filename:
+    # Ignore obvious explanatory entries.
+    if value.startswith("(") or value.endswith(")"):
         return False
 
-    if ":" in filename:
+    if ":" in value:
         return False
 
-    # Accept only .tst and .sh extensions.
-    pattern = r"^[A-Za-z0-9_.-]+\.(tst|sh)$"
+    if re.search(r"\.(tst|sh)$", value, re.IGNORECASE):
+        return True
 
-    return bool(re.match(pattern, filename, re.IGNORECASE))
+    # Preserve possible extensionless procedure identifiers.
+    if re.match(r"^[A-Za-z0-9_-]+$", value):
+        return True
+
+    return False
 
 
-# --------------------------------------------------
-# 3. EXTRACT AND RECONSTRUCT FILENAMES
-# --------------------------------------------------
-
-def extract_filenames(cell_text, warnings=None, subsystem=None):
+def extract_filenames(cell_text, subsystem, warnings):
 
     if not cell_text:
         return []
 
-    # Separate entries using commas and semicolons.
     text = cell_text.replace(",", "\n")
     text = text.replace(";", "\n")
 
@@ -123,97 +99,47 @@ def extract_filenames(cell_text, warnings=None, subsystem=None):
 
     for line in lines:
 
-        # Do not remove internal spaces blindly.
-        line = line.strip()
+        # Reconstruct known split filename patterns.
+        if reconstructed and (
+            reconstructed[-1].endswith("-")
+            or reconstructed[-1].lower().endswith(".t")
+            or reconstructed[-1].lower().endswith(".s")
+        ):
+            reconstructed[-1] += line
 
-        if not line:
-            continue
+        else:
+            reconstructed.append(line)
 
-        if reconstructed:
-
-            previous = reconstructed[-1]
-
-            # Join fragments of split filenames.
-            should_join = (
-                previous.endswith("-")
-                or previous.lower().endswith(".t")
-                or previous.lower().endswith(".s")
-            )
-
-            if should_join:
-                reconstructed[-1] += line
-                continue
-
-        reconstructed.append(line)
-
-    result = []
+    results = []
     seen = set()
 
     for filename in reconstructed:
 
-        filename = filename.strip()
+        filename = re.sub(r"\s+", "", filename)
+
+        if not filename:
+            continue
 
         if not is_valid_filename(filename):
 
-            if warnings is not None:
-                warnings.append({
-                    "subsystem": subsystem,
-                    "value": filename,
-                    "reason": "Does not match .tst/.sh filename filter"
-                })
+            warnings.append({
+                "subsystem": subsystem,
+                "value": filename,
+                "reason": "Invalid or suspicious filename entry"
+            })
 
             continue
 
         key = filename.lower()
 
-        # Remove duplicates without changing capitalization.
         if key not in seen:
             seen.add(key)
-            result.append(filename)
+            results.append(filename)
 
-    return result
-
-
-# --------------------------------------------------
-# 4. FIND SUBSYSTEM HEADING
-# --------------------------------------------------
-
-def extract_subsystem_name(text):
-
-    match = re.match(
-        r"^\s*Subsystem\s*:\s*(.*?)\s*$",
-        text,
-        re.IGNORECASE
-    )
-
-    if match:
-        return match.group(1).strip()
-
-    return None
+    return results
 
 
-# --------------------------------------------------
-# 5. GET EXISTING SUBSYSTEM KEY
-# --------------------------------------------------
-
-def get_subsystem_key(subsystem_data, subsystem_name):
-
-    for existing_name in subsystem_data:
-
-        if existing_name.lower() == subsystem_name.lower():
-            return existing_name
-
-    return subsystem_name
-
-
-# --------------------------------------------------
-# 6. PARSE DOCX DOCUMENT
-# --------------------------------------------------
-
-def parse_subsystem_docx(file_path, warnings=None):
-
-    if warnings is None:
-        warnings = []
+def parse_subsystem_docx(file_path):
 
     if not os.path.isfile(file_path):
         raise FileNotFoundError(
@@ -223,45 +149,50 @@ def parse_subsystem_docx(file_path, warnings=None):
     doc = Document(file_path)
 
     subsystem_data = {}
+    warnings = []
+
     current_subsystem = None
 
+    # Process paragraphs and tables in document order.
     for element in doc.element.body.iterchildren():
-
-        # ------------------------------------------
-        # READ PARAGRAPHS
-        # ------------------------------------------
 
         if isinstance(element, CT_P):
 
             paragraph = Paragraph(element, doc)
-
             text = paragraph.text.strip()
 
-            if not text:
-                continue
+            match = re.match(
+                r"^\s*Subsystem\s*:\s*(.*?)\s*$",
+                text,
+                re.IGNORECASE
+            )
 
-            subsystem_name = extract_subsystem_name(text)
+            if match:
 
-            if subsystem_name:
+                subsystem_name = match.group(1).strip()
 
                 if not subsystem_name:
                     current_subsystem = None
+                    warnings.append({
+                        "subsystem": "",
+                        "value": text,
+                        "reason": "Empty subsystem heading"
+                    })
                     continue
 
-                current_subsystem = get_subsystem_key(
-                    subsystem_data,
-                    subsystem_name
-                )
+                # Case-insensitive subsystem matching.
+                existing_key = None
 
-                subsystem_data.setdefault(
-                    current_subsystem, []
-                )
+                for key in subsystem_data:
+                    if key.lower() == subsystem_name.lower():
+                        existing_key = key
+                        break
 
-                print("\nCURRENT SUBSYSTEM:", current_subsystem)
-
-        # ------------------------------------------
-        # READ TABLES
-        # ------------------------------------------
+                if existing_key:
+                    current_subsystem = existing_key
+                else:
+                    current_subsystem = subsystem_name
+                    subsystem_data[current_subsystem] = []
 
         elif isinstance(element, CT_Tbl):
 
@@ -270,29 +201,22 @@ def parse_subsystem_docx(file_path, warnings=None):
             if not current_subsystem:
 
                 warnings.append({
-                    "subsystem": None,
+                    "subsystem": "",
                     "value": "Table found without subsystem heading",
-                    "reason": "Table skipped"
+                    "reason": "Table cannot be assigned"
                 })
 
                 continue
 
-            print("\nTABLE FOUND:", current_subsystem)
-
             filename_column = None
             header_row = None
 
-            # Find Filename column dynamically.
+            # Locate Filename column dynamically.
             for row_index, row in enumerate(table.rows):
 
-                values = [
-                    cell.text.strip()
-                    for cell in row.cells
-                ]
+                for column_index, cell in enumerate(row.cells):
 
-                for column_index, value in enumerate(values):
-
-                    if normalize_header(value) == "filename":
+                    if normalize_header(cell.text.strip()) == "filename":
 
                         filename_column = column_index
                         header_row = row_index
@@ -305,20 +229,13 @@ def parse_subsystem_docx(file_path, warnings=None):
 
                 warnings.append({
                     "subsystem": current_subsystem,
-                    "value": "Filename column not found",
-                    "reason": "Table skipped"
+                    "value": "Filename column",
+                    "reason": "Filename header not found"
                 })
-
-                print("WARNING: Filename column not found")
 
                 continue
 
-            print(
-                "Filename column:",
-                filename_column + 1
-            )
-
-            # Extract values below the header.
+            # Extract filename values below the header.
             for row in table.rows[header_row + 1:]:
 
                 if filename_column >= len(row.cells):
@@ -326,13 +243,13 @@ def parse_subsystem_docx(file_path, warnings=None):
 
                 cell_text = row.cells[filename_column].text
 
-                extracted = extract_filenames(
+                filenames = extract_filenames(
                     cell_text,
-                    warnings,
-                    current_subsystem
+                    current_subsystem,
+                    warnings
                 )
 
-                for filename in extracted:
+                for filename in filenames:
 
                     existing = [
                         item.lower()
@@ -340,137 +257,116 @@ def parse_subsystem_docx(file_path, warnings=None):
                     ]
 
                     if filename.lower() not in existing:
-
                         subsystem_data[current_subsystem].append(
                             filename
                         )
 
-    return subsystem_data
-
-
-# --------------------------------------------------
-# 7. GENERATE JSON SAFELY
-# --------------------------------------------------
-
-def generate_subsystems_json(data, output_path="subsystems.json"):
-
-    if not isinstance(data, dict) or not data:
+    if not subsystem_data:
         raise ValueError(
-            "No subsystem data found. Existing JSON was not changed."
+            "No subsystem data was extracted from the DOCX."
         )
 
-    # Validate the generated structure.
-    for subsystem, filenames in data.items():
+    return subsystem_data, warnings
 
-        if not subsystem or not isinstance(filenames, list):
-            raise ValueError("Invalid subsystem data")
 
-        for filename in filenames:
+def save_subsystems_json(data, output_file):
 
-            if not is_valid_filename(filename):
-                raise ValueError(
-                    "Invalid filename in output: " + filename
-                )
+    if not data:
+        raise ValueError(
+            "Cannot save empty subsystem configuration."
+        )
 
-    output_path = os.path.abspath(output_path)
-    output_dir = os.path.dirname(output_path)
+    output_directory = os.path.dirname(
+        os.path.abspath(output_file)
+    )
 
-    temp_path = None
+    # Write to a temporary file first.
+    temp_file = None
 
     try:
 
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
-            suffix=".tmp",
-            dir=output_dir,
+            suffix=".json",
+            dir=output_directory,
             delete=False
-        ) as temp_file:
+        ) as file:
+
+            temp_file = file.name
 
             json.dump(
                 data,
-                temp_file,
+                file,
                 indent=4,
                 ensure_ascii=False
             )
 
-            temp_path = temp_file.name
-
-        # Verify temporary JSON before replacing old JSON.
-        with open(temp_path, "r", encoding="utf-8") as file:
+        # Verify generated JSON.
+        with open(temp_file, "r", encoding="utf-8") as file:
             verified_data = json.load(file)
 
-        if verified_data != data:
-            raise ValueError("Generated JSON validation failed")
+        if not isinstance(verified_data, dict):
+            raise ValueError("Invalid JSON structure.")
 
-        # Replace previous JSON only after validation.
-        os.replace(temp_path, output_path)
+        for subsystem, filenames in verified_data.items():
 
-        print("\nJSON GENERATED SUCCESSFULLY:")
-        print(output_path)
+            if not isinstance(subsystem, str):
+                raise ValueError("Invalid subsystem name.")
 
-    except Exception:
+            if not isinstance(filenames, list):
+                raise ValueError("Invalid filename list.")
 
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+            if not all(isinstance(name, str) for name in filenames):
+                raise ValueError("Invalid filename entry.")
 
-        raise
+        # Replace previous configuration only after validation.
+        os.replace(temp_file, output_file)
+        temp_file = None
+
+    finally:
+
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
 
 
-# --------------------------------------------------
-# 8. COMPLETE PROCESS
-# --------------------------------------------------
+def process_subsystem_document(input_file, output_file):
 
-def process_subsystem_document(
-    docx_path,
-    json_path="subsystems.json"
-):
+    data, warnings = parse_subsystem_docx(input_file)
 
-    warnings = []
-
-    data = parse_subsystem_docx(
-        docx_path,
-        warnings
-    )
-
-    if not data:
-        raise ValueError(
-            "No subsystem information extracted. JSON not generated."
-        )
-
-    total_files = sum(
-        len(files)
-        for files in data.values()
-    )
-
-    if total_files == 0:
-        raise ValueError(
-            "No valid .tst or .sh filenames found. JSON not generated."
-        )
-
-    generate_subsystems_json(
-        data,
-        json_path
-    )
+    save_subsystems_json(data, output_file)
 
     return data, warnings
+```
 
+This file contains all three important functions:
 
+* `parse_subsystem_docx()` – extracts subsystem information.
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-3. Create test_subsystem_parser.py
+* `save_subsystems_json()` – validates and saves JSON.
 
-This file will test the actual parser and generate the JSON.
+* `process_subsystem_document()` – connects extraction and JSON generation.
 
+The filtering rules are a starting point: unusual extensionless entries may still need review against your actual filenames. Also, the current implementation supports DOCX only, not PDF yet.
 
+# STEP 3. Create `test_subsystem_parser.py`
 
+Now create another Python file:
+
+`test_subsystem_parser.py`
+
+Copy this code:
+
+Python
+
+```
 from subsystem_parser import process_subsystem_document
 
 
-# DOCX input file
+# Input DOCX file
 DOCX_FILE = "subsystem.docx"
 
-# JSON output file
+# Output JSON file
 JSON_FILE = "subsystems.json"
 
 
@@ -509,7 +405,6 @@ def main():
 
         print("TOTAL SUBSYSTEMS:", total_subsystems)
         print("TOTAL FILENAMES:", total_files)
-
         print("TOTAL WARNINGS:", len(warnings))
 
         if warnings:
@@ -518,25 +413,12 @@ def main():
 
             for warning in warnings:
 
-                print(
-                    "Subsystem:",
-                    warning["subsystem"]
-                )
-
-                print(
-                    "Value:",
-                    warning["value"]
-                )
-
-                print(
-                    "Reason:",
-                    warning["reason"]
-                )
-
+                print("Subsystem:", warning["subsystem"])
+                print("Value:", warning["value"])
+                print("Reason:", warning["reason"])
                 print("--------------------------")
 
         print("\nJSON FILE:", JSON_FILE)
-
         print("\nPARSER TEST COMPLETED")
 
     except Exception as error:
@@ -547,22 +429,131 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
 
+# STEP 4. Install the required library
 
-
-///////////////////////////////////////////////////////////////////////////////////////////////////////////
-Run the parser
-
-Make sure subsystem.docx is in the project folder.
+Open your terminal in the project folder.
 
 Run:
 
+Bash
+
+```
+pip install python-docx
+```
+
+# STEP 5. Run the parser
+
+Make sure these three files are in the same folder:
+
+```
+subsystem.docx
+subsystem_parser.py
+test_subsystem_parser.py
+```
+
+Now execute:
+
+Bash
+
+```
 python test_subsystem_parser.py
+```
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
+# STEP 6. What output should you expect?
 
+Since your previous extraction identified 17 subsystems, we expect approximately this structure (the actual filename counts depend on your document).
 
+Expected terminal summary
 
+Example
 
+```
+===================================
+   SUBSYSTEM PARSER TESTING
+===================================
 
+SUBSYSTEM: POWER
+    abc-abcd.tst
+    sample.sh
 
+SUBSYSTEM: MOTION
+    motion.tst
+
+...
+
+===================================
+          FINAL SUMMARY
+===================================
+
+TOTAL SUBSYSTEMS: 17
+TOTAL FILENAMES: [actual count]
+TOTAL WARNINGS: [actual count]
+
+JSON FILE: subsystems.json
+
+PARSER TEST COMPLETED
+```
+
+The filenames above are illustrative, not your document's actual results.
+
+It should also generate `subsystems.json` automatically.
+
+Example:
+
+JSON
+
+```
+{
+    "POWER": [
+        "abc-abcd.tst",
+        "sample.sh"
+    ],
+    "MOTION": [
+        "motion.tst"
+    ]
+}
+```
+
+# STEP 7. What happens after this?
+
+Once this independent parser works, we move to the actual dashboard integration.
+
+Final application workflow
+
+Upload through Flask dashboard
+
+Test report PDFs + subsystem DOCX/PDF
+
+subsystem_parser.py
+
+Extract and filter subsystem filenames
+
+subsystems.json
+
+Generate configuration automatically
+
+dashboard.py
+
+Match procedures and calculate results
+
+Final Satellite Testing Dashboard
+
+We will then implement:
+
+1. DOCX and PDF subsystem uploads.
+
+2. Automatic JSON generation from uploaded documents.
+
+3. Overall and Custom Date Range filtering.
+
+4. Integration with your existing `app.py`.
+
+5. Integration with `dashboard.py`.
+
+6. Frontend changes in `index.html` and `style.css`.
+
+For now, do only Steps 1–5.
+
+When you run `python test_subsystem_parser.py`, send me the terminal output. Then we can move to Flask integration without unnecessarily changing your existing working files.
