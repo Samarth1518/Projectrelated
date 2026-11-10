@@ -1,0 +1,1196 @@
+main code 
+
+# main.py
+# Main program for converting every PDF in input/ into one JSON file.
+# Compatible with Python 3.6 and PyMuPDF 1.18.x.
+
+import glob
+import json
+import os
+import re
+import sys
+from collections import OrderedDict
+from datetime import datetime
+
+import fitz
+
+from pdf_parser import parse_pdf_text, normalize_procedure_name, validate_execution
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+
+def get_pdf_document(path):
+    """Open a PDF using the PyMuPDF API available in this environment."""
+    return fitz.open(path)
+
+
+def get_page_count(document):
+    """Support both older and newer PyMuPDF page-count properties."""
+    if hasattr(document, "pageCount"):
+        return document.pageCount
+    return document.page_count
+
+
+def get_page(document, page_number):
+    """Support both older and newer PyMuPDF page-loading methods."""
+    if hasattr(document, "loadPage"):
+        return document.loadPage(page_number)
+    return document.load_page(page_number)
+
+
+def get_page_text(page):
+    """Extract selectable text from one page."""
+    if hasattr(page, "getText"):
+        return page.getText("text")
+    return page.get_text("text")
+
+
+def read_pdf_text_incrementally(path):
+    """
+    Read one page at a time, instead of asking PyMuPDF to extract the whole
+    document in one operation. The text is kept together so procedure rows
+    that continue across page boundaries can still be parsed as one sequence.
+    """
+    document = None
+    page_text_parts = []
+    page_count = 0
+
+    try:
+        document = get_pdf_document(path)
+        page_count = get_page_count(document)
+
+        for page_number in range(page_count):
+            page = get_page(document, page_number)
+            page_text_parts.append(get_page_text(page) or "")
+
+            # Keep a page boundary, but do not reset procedure or mode context.
+            page_text_parts.append("\n")
+
+    finally:
+        if document is not None:
+            document.close()
+
+    return "".join(page_text_parts), page_count
+
+
+def list_input_pdfs():
+    """Return all PDF files directly inside the input folder."""
+    pattern = os.path.join(INPUT_DIR, "*.pdf")
+    return sorted(glob.glob(pattern), key=lambda path: os.path.basename(path).lower())
+
+
+def ensure_folders_exist():
+    """Check the folders that are part of the agreed project layout."""
+    if not os.path.isdir(INPUT_DIR):
+        raise RuntimeError(
+            "The input folder was not found:\n" + INPUT_DIR
+        )
+
+    if not os.path.isdir(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+
+
+def add_execution(output_data, execution, pdf_name):
+    """Group an execution under its procedure name."""
+    procedure_name = (execution.get("Procedure Name") or "").strip()
+
+    if not procedure_name:
+        procedure_name = "UNKNOWN_PROCEDURE_" + str(len(output_data) + 1)
+        print(
+            "WARNING: A procedure name could not be detected in "
+            + pdf_name + ". It was placed under " + procedure_name + "."
+        )
+
+    normalized_name = normalize_procedure_name(procedure_name)
+
+    # Reuse the existing key if the same procedure name appears with different
+    # capitalization or extra spaces in another execution.
+    existing_key = None
+    for key in output_data.keys():
+        if key != "Insights" and normalize_procedure_name(key) == normalized_name:
+            existing_key = key
+            break
+
+    if existing_key is None:
+        existing_key = procedure_name
+        output_data[existing_key] = {"procedures": []}
+
+    clean_execution = OrderedDict()
+    clean_execution["date_time"] = execution.get("date_time", "")
+    clean_execution["Dur"] = execution.get("Dur", 0)
+    clean_execution["Status"] = execution.get("Status", {})
+    clean_execution["final_status"] = execution.get("final_status", "Success")
+    clean_execution["final_status_reason"] = execution.get(
+        "final_status_reason", "None"
+    )
+    clean_execution["mode_executions"] = execution.get("mode_executions", {})
+
+    output_data[existing_key]["procedures"].append(clean_execution)
+
+
+def remove_old_generated_outputs():
+    """Remove only files matching this program's generated-output filename."""
+    pattern = os.path.join(OUTPUT_DIR, "output_*.json")
+    for path in glob.glob(pattern):
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+def validate_output_data(output_data):
+    """Check basic JSON structure before replacing the previous output."""
+    if "Insights" not in output_data:
+        raise ValueError("The output is missing the global Insights object.")
+
+    for procedure_name, procedure_group in output_data.items():
+        if procedure_name == "Insights":
+            continue
+
+        if not isinstance(procedure_group, dict):
+            raise ValueError("Invalid procedure group: " + str(procedure_name))
+
+        if not isinstance(procedure_group.get("procedures"), list):
+            raise ValueError(
+                "Procedure group has no procedures list: " + str(procedure_name)
+            )
+
+        for execution in procedure_group["procedures"]:
+            issues = validate_execution(execution)
+            if issues:
+                raise ValueError(
+                    "Output validation failed for " + str(procedure_name) +
+                    ": " + "; ".join(issues)
+                )
+
+
+def write_output_safely(output_data):
+    """
+    Write and validate a temporary JSON file first. Only after it succeeds,
+    remove the previous generated JSON and rename the new file into place.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_name = "output_" + timestamp + ".json"
+    final_path = os.path.join(OUTPUT_DIR, output_name)
+    temporary_path = final_path + ".tmp"
+
+    try:
+        with open(temporary_path, "w", encoding="utf-8") as output_file:
+            json.dump(
+                output_data,
+                output_file,
+                indent=4,
+                ensure_ascii=False,
+            )
+            output_file.write("\n")
+
+        # Re-open the temporary file to ensure the JSON can be read.
+        with open(temporary_path, "r", encoding="utf-8") as check_file:
+            json.load(check_file)
+
+        # Preserve the previous output until the new file has been written
+        # and successfully parsed as JSON.
+        remove_old_generated_outputs()
+        os.rename(temporary_path, final_path)
+
+    except Exception:
+        if os.path.exists(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+        raise
+
+    return final_path
+
+
+def main():
+    print("=" * 60)
+    print("PDF to JSON converter")
+    print("=" * 60)
+
+    try:
+        ensure_folders_exist()
+    except Exception as error:
+        print("ERROR:", error)
+        return 1
+
+    pdf_paths = list_input_pdfs()
+
+    if not pdf_paths:
+        print("No PDF files were found in the input folder:")
+        print(INPUT_DIR)
+        print("Put new_dataset.pdf (and any other PDFs) inside input/ and run again.")
+        return 1
+
+    output_data = OrderedDict()
+    pdf_names = []
+    total_pages_read = 0
+    total_procedures = 0
+    total_warnings = 0
+    pdfs_read = 0
+
+    for pdf_path in pdf_paths:
+        pdf_name = os.path.basename(pdf_path)
+        print("\nReading PDF:", pdf_name)
+
+        try:
+            pdf_text, page_count = read_pdf_text_incrementally(pdf_path)
+            total_pages_read += page_count
+            pdf_names.append(pdf_name)
+
+            executions, warnings = parse_pdf_text(pdf_text, pdf_name)
+            pdfs_read += 1
+
+            if not executions:
+                print("WARNING: No procedure executions were extracted from", pdf_name)
+
+            for execution in executions:
+                add_execution(output_data, execution, pdf_name)
+                total_procedures += 1
+
+            for warning in warnings:
+                total_warnings += 1
+                print("WARNING:", warning)
+
+            print(
+                "Finished:", pdf_name,
+                "| Pages:", page_count,
+                "| Procedure executions:", len(executions),
+                "| Warnings:", len(warnings),
+            )
+
+        except Exception as error:
+            print("ERROR: Could not process", pdf_name)
+            print("Reason:", str(error))
+            print("The other PDFs will still be processed.")
+
+    if pdfs_read == 0:
+        print("\nNo PDF was processed successfully. No new output was created.")
+        return 1
+
+    # Insights is one global object, added once at the end.
+    output_data["Insights"] = OrderedDict([
+        ("Total PDFs read", pdfs_read),
+        ("PDF names", pdf_names),
+        ("Total Pages read", total_pages_read),
+    ])
+
+    try:
+        validate_output_data(output_data)
+        output_path = write_output_safely(output_data)
+    except Exception as error:
+        print("\nERROR: The output could not be safely saved.")
+        print("Reason:", str(error))
+        print("Any previous generated JSON was kept if writing had not completed.")
+        return 1
+
+    print("\n" + "=" * 60)
+    print("Conversion finished.")
+    print("PDFs read:", pdfs_read)
+    print("Total pages read:", total_pages_read)
+    print("Procedure executions extracted:", total_procedures)
+    print("Warnings raised:", total_warnings)
+    print("Output file:", output_path)
+    print("=" * 60)
+
+    if total_warnings:
+        print(
+            "\nPlease review the WARNING messages above and spot-check the JSON "
+            "against the PDF before using it."
+        )
+    else:
+        print(
+            "\nPlease still spot-check a few records against the source PDF "
+            "before relying on the output."
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+pdf_parser.py code 
+
+
+# pdf_parser.py
+# Extract procedure and STEP information from PDF text.
+# Compatible with Python 3.6.5.
+
+import re
+from datetime import datetime
+
+
+STATUS_NAMES = ("success", "failure", "suspend", "progress")
+
+STATUS_TITLE = {
+    "success": "Success",
+    "failure": "Failure",
+    "suspend": "Suspend",
+    "progress": "Progress",
+}
+
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+STEP_ID_RE = re.compile(r"^\s*(\d{2}\.\d{3,4})\b")
+MODE_RE = re.compile(r"^\s*MODE\b", re.IGNORECASE)
+OPERATING_MODE_RE = re.compile(
+    r"^\s*OPERATING\s+MODE\b", re.IGNORECASE
+)
+MODE_NAME_RE = re.compile(r"\b(AUTO|MANUAL)\b", re.IGNORECASE)
+
+DATE_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[-/]([A-Za-z]{3}|\d{1,2})[-/](\d{4})(?!\d)",
+    re.IGNORECASE,
+)
+TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2}):(\d{2}):(\d{2})[:.](\d{1,3})(?!\d)"
+)
+DATE_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})[-/]([A-Za-z]{3}|\d{1,2})[-/](\d{4})"
+    r"\s+(\d{1,2}):(\d{2}):(\d{2})[:.](\d{1,3})(?!\d)",
+    re.IGNORECASE,
+)
+DURATION_RE = re.compile(
+    r"\bDur\s*:\s*(\d+(?:\.\d+)?)\s*\(s\)", re.IGNORECASE
+)
+STATUS_WORD_RE = re.compile(
+    r"\b(Success|Failure|Suspend|Progress)\b", re.IGNORECASE
+)
+SEPARATOR_RE = re.compile(r"^[\s\-_=*|]+$")
+
+
+def normalize_procedure_name(name):
+    """Normalize a procedure name for grouping."""
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def normalize_datetime(value):
+    """Convert a supported date/time to YYYY-MM-DD HH:MM:SS.mmm."""
+    match = DATE_TIME_RE.search(value or "")
+    if not match:
+        return None
+
+    day, month_text, year, hour, minute, second, millis = match.groups()
+
+    if month_text.isdigit():
+        month = int(month_text)
+    else:
+        month = MONTHS.get(month_text.lower()[:3])
+
+    if month is None or not 1 <= month <= 12:
+        return None
+
+    try:
+        parsed = datetime(
+            int(year), month, int(day),
+            int(hour), int(minute), int(second)
+        )
+    except ValueError:
+        return None
+
+    return (
+        parsed.strftime("%Y-%m-%d %H:%M:%S")
+        + "."
+        + millis[:3].ljust(3, "0")
+    )
+
+
+def _combine_split_date_time(lines):
+    """Join dates and times that are split across adjacent lines."""
+    combined = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        date_match = DATE_RE.search(line)
+
+        if (
+            date_match
+            and not DATE_TIME_RE.search(line)
+            and index + 1 < len(lines)
+        ):
+            next_line = lines[index + 1]
+            time_match = TIME_RE.search(next_line)
+
+            if time_match:
+                combined.append(
+                    line[:date_match.start()]
+                    + date_match.group(0)
+                    + " "
+                    + time_match.group(0)
+                    + next_line[time_match.end():]
+                )
+                index += 2
+                continue
+
+        combined.append(line)
+        index += 1
+
+    return combined
+
+
+def split_procedure_blocks(text):
+    """Split the document whenever a new Procedure: header begins."""
+    matches = list(
+        re.finditer(r"\bProcedure\s*:", text or "", re.IGNORECASE)
+    )
+    blocks = []
+
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+        blocks.append(text[start:end])
+
+    return blocks
+
+
+def extract_metadata(block):
+    """Extract procedure name, timestamp, and rounded duration."""
+    name_match = re.search(
+        r"\bProcedure\s*:\s*(.*?)\s+\bTime\s*:",
+        block,
+        re.IGNORECASE | re.DOTALL,
+    )
+    name = ""
+
+    if name_match:
+        name = re.sub(r"\s+", " ", name_match.group(1)).strip()
+
+    table_match = re.search(r"\bSTEP\s+ID\b", block, re.IGNORECASE)
+    header = block[:table_match.start()] if table_match else block
+
+    date_time = normalize_datetime(header)
+
+    duration_match = DURATION_RE.search(header)
+    duration = None
+
+    if duration_match:
+        duration = int(float(duration_match.group(1)) + 0.5)
+
+    return name, date_time, duration
+
+
+def _is_mode_start(line):
+    """Recognize a MODE marker."""
+    return bool(MODE_RE.match(line or ""))
+
+
+def _mode_name(lines):
+    """Find AUTO or MANUAL in a MODE event."""
+    saw_mode = False
+
+    for line in lines:
+        if _is_mode_start(line):
+            saw_mode = True
+
+        if saw_mode:
+            match = MODE_NAME_RE.search(line)
+            if match:
+                return match.group(1).lower()
+
+    return None
+
+
+def _status_near_timestamp(lines):
+    """Find the status associated with a timestamp."""
+    timestamp_seen = False
+
+    for line in lines:
+        date_match = DATE_RE.search(line)
+        time_match = TIME_RE.search(line)
+
+        if date_match or time_match:
+            timestamp_seen = True
+
+            if time_match:
+                suffix = line[time_match.end():]
+                matches = list(STATUS_WORD_RE.finditer(suffix))
+
+                if matches:
+                    return matches[-1].group(1).lower()
+
+            continue
+
+        if timestamp_seen:
+            match = re.match(
+                r"^(Success|Failure|Suspend|Progress)\b",
+                line.strip(),
+                re.IGNORECASE,
+            )
+
+            if match:
+                return match.group(1).lower()
+
+    return None
+
+
+def _description_and_reason(step_lines, warnings, step_id):
+    """Extract STEP description and continuation text."""
+    lines = _combine_split_date_time(step_lines)
+    description_parts = []
+    detail_parts = []
+    timestamp_seen = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line or SEPARATOR_RE.fullmatch(line):
+            continue
+
+        line = STEP_ID_RE.sub("", line).strip()
+
+        date_match = DATE_RE.search(line)
+        time_match = TIME_RE.search(line)
+        positions = []
+
+        if date_match:
+            positions.append(date_match.start())
+
+        if time_match:
+            positions.append(time_match.start())
+
+        if positions:
+            boundary = min(positions)
+            before_timestamp = line[:boundary].strip()
+            after_timestamp = line[boundary:].strip()
+
+            if before_timestamp:
+                if timestamp_seen:
+                    detail_parts.append(before_timestamp)
+                else:
+                    description_parts.append(before_timestamp)
+
+            after_timestamp = DATE_TIME_RE.sub(" ", after_timestamp)
+            after_timestamp = DATE_RE.sub(" ", after_timestamp)
+            after_timestamp = TIME_RE.sub(" ", after_timestamp)
+            after_timestamp = re.sub(
+                r"\b(Success|Failure|Suspend|Progress)\s*$",
+                "",
+                after_timestamp,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            if after_timestamp:
+                detail_parts.append(after_timestamp)
+
+            timestamp_seen = True
+            continue
+
+        if re.match(
+            r"^(Success|Failure|Suspend|Progress)\s*$",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+
+        if timestamp_seen:
+            detail_parts.append(line)
+        else:
+            description_parts.append(line)
+
+    description = re.sub(
+        r"\s+", " ", " ".join(description_parts)
+    ).strip()
+    details = re.sub(
+        r"\s+", " ", " ".join(detail_parts)
+    ).strip()
+
+    if description and details:
+        full_text = description + ", " + details
+    else:
+        full_text = description or details
+
+    if not full_text:
+        warnings.append(
+            "STEP " + step_id
+            + " has no confidently extracted description."
+        )
+
+    return description, details, full_text
+
+
+def _read_mode_event(mode_lines, warnings):
+    """Extract timestamp and status from a MODE event."""
+    lines = _combine_split_date_time(mode_lines)
+    date_time = normalize_datetime(" ".join(lines))
+    status = _status_near_timestamp(lines)
+
+    if not date_time or not status:
+        warnings.append(
+            "A MODE row has a missing or unrecognized timestamp/status."
+        )
+
+    return {
+        "date_time": date_time or "",
+        "status": STATUS_TITLE.get(status, "") if status else "",
+    }
+
+
+def _new_status_lists():
+    return {name: [] for name in STATUS_NAMES}
+
+
+def _parse_procedure_steps(block, source_name, execution_number):
+    """Extract STEP rows and assign each row to its active mode."""
+    warnings = []
+    overall_status = _new_status_lists()
+    mode_status = {
+        "auto": _new_status_lists(),
+        "manual": _new_status_lists(),
+    }
+    auto_date_time_status = []
+    failure_reasons = []
+    seen_ids = set()
+
+    lines = block.splitlines()
+    table_started = False
+    current_mode = "manual"
+    rows = []
+
+    current_step_id = None
+    current_step_lines = []
+    current_step_switches_to_manual = False
+
+    mode_lines = []
+    waiting_for_split_mode_name = False
+
+    def save_step():
+        """Save a STEP using the mode active when that STEP began."""
+        if current_step_id is not None:
+            rows.append((
+                current_step_id,
+                list(current_step_lines),
+                current_mode,
+            ))
+
+    def finish_step():
+        """Save a STEP before applying its SINGLE STEP mode change."""
+        nonlocal current_step_id
+        nonlocal current_step_lines
+        nonlocal current_step_switches_to_manual
+        nonlocal current_mode
+
+        save_step()
+
+        if current_step_switches_to_manual:
+            current_mode = "manual"
+
+        current_step_id = None
+        current_step_lines = []
+        current_step_switches_to_manual = False
+
+    def save_mode():
+        """Save the current MODE event, if one exists."""
+        if mode_lines:
+            mode = _mode_name(mode_lines)
+
+            if mode:
+                event = _read_mode_event(mode_lines, warnings)
+
+                if mode == "auto":
+                    auto_date_time_status.append(event)
+
+            mode_lines[:] = []
+
+    def start_step(step_match, line):
+        """Start a new STEP row."""
+        nonlocal current_step_id
+        nonlocal current_step_lines
+        nonlocal current_step_switches_to_manual
+
+        current_step_id = step_match.group(1)
+        remainder = line[step_match.end():].strip()
+        current_step_lines = [remainder] if remainder else []
+
+        current_step_switches_to_manual = bool(
+            re.search(
+                r"\bSINGLE\s+STEP\b",
+                remainder,
+                re.IGNORECASE,
+            )
+        )
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not table_started:
+            if re.search(r"\bSTEP\s+ID\b", line, re.IGNORECASE):
+                table_started = True
+            continue
+
+        # OPERATING MODE AUTO/MANUAL changes the mode for subsequent rows.
+        operating_match = OPERATING_MODE_RE.match(line)
+
+        if operating_match:
+            finish_step()
+            save_mode()
+
+            mode_match = MODE_NAME_RE.search(line[operating_match.end():])
+
+            if mode_match:
+                current_mode = mode_match.group(1).lower()
+
+            mode_lines = []
+            waiting_for_split_mode_name = False
+            continue
+
+        # MODE AUTO/MANUAL, including MODE and its name on separate lines.
+        if _is_mode_start(line) or waiting_for_split_mode_name:
+            finish_step()
+
+            if _is_mode_start(line):
+                save_mode()
+                mode_lines = [line]
+                mode_match = MODE_NAME_RE.search(line)
+
+                if mode_match:
+                    current_mode = mode_match.group(1).lower()
+                    waiting_for_split_mode_name = False
+                else:
+                    waiting_for_split_mode_name = True
+
+            else:
+                mode_lines.append(line)
+                mode_match = MODE_NAME_RE.search(line)
+
+                if mode_match:
+                    current_mode = mode_match.group(1).lower()
+                    waiting_for_split_mode_name = False
+
+            continue
+
+        # Collect timestamp/status lines belonging to a MODE event.
+        if mode_lines:
+            step_match = STEP_ID_RE.match(line)
+
+            if step_match:
+                save_mode()
+                start_step(step_match, line)
+                continue
+
+            mode_lines.append(line)
+            continue
+
+        step_match = STEP_ID_RE.match(line)
+
+        if step_match:
+            finish_step()
+            start_step(step_match, line)
+
+        elif current_step_id is not None:
+            current_step_lines.append(line)
+
+            # SINGLE STEP can also appear on a continuation line.
+            if re.search(
+                r"\bSINGLE\s+STEP\b",
+                line,
+                re.IGNORECASE,
+            ):
+                current_step_switches_to_manual = True
+
+    finish_step()
+    save_mode()
+
+    for step_id, step_lines, step_mode in rows:
+        if step_id in seen_ids:
+            warnings.append(
+                "Duplicate STEP ID " + step_id
+                + " found in " + source_name
+                + ", execution " + str(execution_number)
+                + "; both occurrences are retained."
+            )
+
+        seen_ids.add(step_id)
+
+        status = _status_near_timestamp(
+            _combine_split_date_time(step_lines)
+        )
+
+        if status is None:
+            warnings.append(
+                "STEP " + step_id
+                + " has no confidently detected status in "
+                + source_name + ", execution "
+                + str(execution_number) + "."
+            )
+            continue
+
+        description, details, full_text = _description_and_reason(
+            step_lines, warnings, step_id
+        )
+
+        overall_status[status].append(step_id)
+        mode_status[step_mode][status].append(step_id)
+
+        if status == "failure":
+            failure_reasons.append({step_id: full_text})
+
+    mode_executions = {
+        "auto": {
+            "date_time_status": auto_date_time_status,
+            "success": mode_status["auto"]["success"],
+            "failure": mode_status["auto"]["failure"],
+            "progress": mode_status["auto"]["progress"],
+            "suspend": mode_status["auto"]["suspend"],
+        },
+        "manual": {
+            "success": mode_status["manual"]["success"],
+            "failure": mode_status["manual"]["failure"],
+            "progress": mode_status["manual"]["progress"],
+            "suspend": mode_status["manual"]["suspend"],
+        },
+    }
+
+    return overall_status, failure_reasons, mode_executions, warnings
+
+
+def parse_pdf_text(text, source_name="unknown PDF"):
+    """Parse procedure executions from extracted PDF text."""
+    executions = []
+    warnings = []
+    blocks = split_procedure_blocks(text or "")
+
+    if not blocks:
+        warnings.append(
+            source_name + ": no Procedure: headers were detected."
+        )
+        return executions, warnings
+
+    for execution_number, block in enumerate(blocks, 1):
+        name, date_time, duration = extract_metadata(block)
+
+        if not name:
+            warnings.append(
+                source_name + ", execution " + str(execution_number)
+                + ": procedure name was not detected."
+            )
+
+        if not date_time:
+            warnings.append(
+                source_name + ", execution " + str(execution_number)
+                + ": procedure timestamp was not detected."
+            )
+
+        if duration is None:
+            warnings.append(
+                source_name + ", execution " + str(execution_number)
+                + ": duration was not detected."
+            )
+
+        status, failure_reasons, modes, row_warnings = (
+            _parse_procedure_steps(block, source_name, execution_number)
+        )
+        warnings.extend(row_warnings)
+
+        if status["failure"]:
+            final_status = "Failure"
+            final_status_reason = failure_reasons
+        else:
+            final_status = "Success"
+            final_status_reason = "None"
+
+        executions.append({
+            "Procedure Name": name,
+            "date_time": date_time or "",
+            "Dur": duration if duration is not None else 0,
+            "Status": status,
+            "final_status": final_status,
+            "final_status_reason": final_status_reason,
+            "mode_executions": modes,
+        })
+
+    return executions, warnings
+
+
+def validate_execution(execution):
+    """Return basic consistency problems for one execution."""
+    issues = []
+    status = execution.get("Status", {})
+
+    for name in STATUS_NAMES:
+        if not isinstance(status.get(name), list):
+            issues.append(
+                "Status key '" + name + "' is missing or invalid."
+            )
+
+    if status.get("failure") and execution.get("final_status") != "Failure":
+        issues.append(
+            "A failed STEP exists but final_status is not Failure."
+        )
+
+    if not status.get("failure") and execution.get("final_status") != "Success":
+        issues.append(
+            "No failed STEP exists but final_status is not Success."
+        )
+
+    return issues
+    
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+json_to_csv.py  code 
+
+
+
+# json_to_csv.py
+# Convert generated PDF-to-JSON output into a grouped CSV file.
+# Compatible with Python 3.6.5.
+
+import os
+import glob
+import json
+import csv
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+
+def get_latest_json():
+    """Find the latest generated JSON file."""
+
+    pattern = os.path.join(OUTPUT_DIR, "output_*.json")
+    json_files = glob.glob(pattern)
+
+    if not json_files:
+        raise FileNotFoundError(
+            "No generated JSON files found in output folder."
+        )
+
+    return max(json_files, key=os.path.getmtime)
+
+
+def get_mode(execution):
+    """
+    Determine whether an execution was Auto, Manual or Both.
+
+    Mode is determined using the STEP IDs recorded in
+    mode_executions, not just the mode timestamps.
+    """
+
+    mode_data = execution.get("mode_executions", {})
+
+    auto_data = mode_data.get("auto", {})
+    manual_data = mode_data.get("manual", {})
+
+    status_names = [
+        "success",
+        "failure",
+        "progress",
+        "suspend"
+    ]
+
+    auto_has_steps = False
+    manual_has_steps = False
+
+    for status in status_names:
+
+        if auto_data.get(status, []):
+            auto_has_steps = True
+
+        if manual_data.get(status, []):
+            manual_has_steps = True
+
+    if auto_has_steps and manual_has_steps:
+        return "Both (Auto + Manual)"
+
+    elif auto_has_steps:
+        return "Auto"
+
+    elif manual_has_steps:
+        return "Manual"
+
+    else:
+        return "Unknown"
+
+
+def get_datetime_sort_key(execution):
+    """Sort executions using their execution date and time."""
+
+    date_value = execution.get("date_time", "")
+
+    if not date_value:
+        return (1, datetime.max)
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S"
+    ]
+
+    for date_format in formats:
+        try:
+            parsed_date = datetime.strptime(
+                date_value,
+                date_format
+            )
+            return (0, parsed_date)
+
+        except ValueError:
+            continue
+
+    # Invalid or unrecognized dates are placed at the end.
+    return (1, datetime.max)
+
+
+def convert_json_to_csv():
+
+    print("=" * 60)
+    print("JSON TO CSV CONVERTER")
+    print("=" * 60)
+
+    # Check output folder
+    if not os.path.isdir(OUTPUT_DIR):
+        raise RuntimeError("Output folder does not exist.")
+
+    # Find latest JSON
+    json_path = get_latest_json()
+
+    print("\nReading JSON:", os.path.basename(json_path))
+
+    # Read JSON
+    with open(json_path, "r", encoding="utf-8") as json_file:
+        data = json.load(json_file)
+
+    # CSV filename uses the same timestamp as the JSON.
+    csv_name = os.path.splitext(
+        os.path.basename(json_path)
+    )[0] + ".csv"
+
+    csv_path = os.path.join(OUTPUT_DIR, csv_name)
+
+    serial_number = 1
+    total_procedures = 0
+    total_executions = 0
+
+    # CSV column headings
+    headers = [
+        "Si No",
+        "Procedure Name",
+        "Date of Execution",
+        "Duration",
+        "Mode",
+        "Final Status"
+    ]
+
+    with open(
+        csv_path,
+        "w",
+        newline="",
+        encoding="utf-8-sig"
+    ) as csv_file:
+
+        writer = csv.writer(csv_file)
+
+        writer.writerow(headers)
+
+        # Process each procedure
+        for procedure_name, procedure_data in data.items():
+
+            # Ignore global Insights object
+            if procedure_name == "Insights":
+                continue
+
+            if not isinstance(procedure_data, dict):
+                continue
+
+            executions = procedure_data.get(
+                "procedures", []
+            )
+
+            if not isinstance(executions, list):
+                continue
+
+            if not executions:
+                continue
+
+            # Sort executions from oldest to latest
+            executions = sorted(
+                executions,
+                key=get_datetime_sort_key
+            )
+
+            first_execution = True
+
+            # Write each execution in a separate row
+            for execution in executions:
+
+                if not isinstance(execution, dict):
+                    continue
+
+                date_time = execution.get(
+                    "date_time", ""
+                )
+
+                duration = execution.get(
+                    "Dur", ""
+                )
+
+                mode = get_mode(execution)
+
+                final_status = execution.get(
+                    "final_status", ""
+                )
+
+                if first_execution:
+
+                    writer.writerow([
+                        serial_number,
+                        procedure_name,
+                        date_time,
+                        duration,
+                        mode,
+                        final_status
+                    ])
+
+                    first_execution = False
+                    serial_number += 1
+                    total_procedures += 1
+
+                else:
+
+                    writer.writerow([
+                        "",
+                        "",
+                        date_time,
+                        duration,
+                        mode,
+                        final_status
+                    ])
+
+                total_executions += 1
+
+    print("\nConversion completed successfully!")
+
+    print("JSON file:", os.path.basename(json_path))
+    print("CSV file:", os.path.basename(csv_path))
+
+    print("Total procedures:", total_procedures)
+    print("Total executions:", total_executions)
+
+    print("\nCSV saved at:")
+    print(csv_path)
+
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+
+    try:
+        convert_json_to_csv()
+
+    except Exception as error:
+        print("\nERROR:", str(error))
+        
