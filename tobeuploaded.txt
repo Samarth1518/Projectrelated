@@ -638,3 +638,191 @@ Then the application should automatically:
 We'll preserve your existing PDF report processing and dashboard functionality.
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Yes, I've understood the complete project, the existing `app.py`, the current implementation, and the future requirements.
+
+We'll continue from the existing working application. We will not rewrite the project or disturb the functionality that is already working.
+
+### 1. What your current `app.py` does
+
+Your existing application currently follows this workflow:
+
+User opens Flask dashboard
+
+Enters project name
+
+Uploads multiple PDF test reports
+
+PDFs saved in `input/`
+
+`main.py` processes PDFs
+
+Generates JSON in `output/`
+
+`dashboard.py` processes JSON
+
+Dashboard displayed
+
+This existing functionality should remain intact.
+
+### 2. What we need to add
+
+We will extend the existing application to support the new workflow.
+
+The updated upload page will contain:
+
+1. Project Name.
+
+2. Multiple Test Report PDFs.
+
+3. Subsystem Configuration Document (`.docx` or `.pdf`).
+
+4. Date Selection (Overall / Custom Date Range).
+
+5. Generate Dashboard button.
+
+The new processing flow will be:
+
+User uploads test reports and subsystem document
+
+PDF Reports
+
+Existing processing
+
+`main.py`
+
+`output_*.json`
+
+Subsystem Document
+
+New processing
+
+`subsystem_parser.py`
+
+`subsystems.json`
+
+`dashboard.py`
+
+Matching, date filtering and calculations
+
+Updated Dashboard
+
+### 3. How we will modify the project
+
+We will follow this exact order:
+
+| Step | File                  | Work                                        |
+| ---- | --------------------- | ------------------------------------------- |
+| 1    | `subsystem_parser.py` | Complete and test document parsing          |
+| 2    | `app.py`              | Add the second upload and integrate parsing |
+| 3    | `index.html`          | Add upload and date-selection controls      |
+| 4    | `style.css`           | Style the new controls                      |
+| 5    | `dashboard.py`        | Implement date filtering                    |
+| 6    | Testing               | Test the complete application               |
+
+### 4. Important rules I will follow
+
+* Preserve your existing PDF parser.
+
+* Preserve your existing JSON structure.
+
+* Keep the 90% similarity matching.
+
+* Keep your existing ambiguous matching behaviour.
+
+* Replace `subsystems.json` only after successful parsing and validation.
+
+* Never destroy the previous valid subsystem configuration when a new upload fails.
+
+* Maintain Python 3.6.5 compatibility.
+
+* Keep the existing dashboard design and Chart.js graph.
+
+* Do not introduce unnecessary dependencies.
+
+### 5. What we should do right now
+
+We should continue from the exact point where we stopped: completing the `python-docx` installation and testing `subsystem_parser.py`.
+
+One question: Have you successfully installed `python-docx` version 0.8.11 and confirmed that this command works?
+
+Bash
+
+```
+python -c "from docx import Document; print('Word document reader working!')"
+```
+
+Once confirmed, we'll proceed with the next step without changing your existing `app.py` prematurely.
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Perfect! Now let's finish the Satellite Testing Dashboard step by step.
+
+We have already established the architecture and requirements. We'll work on the existing project rather than starting again.
+
+### Our implementation plan
+
+1. Complete `subsystem_parser.py`
+
+   * Read DOCX and text-based PDF documents.
+
+   * Identify subsystem headings.
+
+   * Locate the Filename column.
+
+   * Extract and reconstruct filenames.
+
+   * Generate and validate `subsystems.json`.
+2. Update `app.py`
+
+   * Add subsystem document upload.
+
+   * Connect the new parser.
+
+   * Preserve existing PDF processing.
+
+   * Handle errors and safe JSON replacement.
+3. Update `index.html` and `style.css`
+
+   * Add the second upload field.
+
+   * Add Overall and Custom Date Range options.
+
+   * Maintain the existing dashboard design.
+4. Update `dashboard.py`
+
+   * Implement date filtering.
+
+   * Select the latest execution within the selected period.
+
+   * Handle procedures with no execution in the selected range.
+5. Complete integration testing
+
+   * Test multiple PDFs.
+
+   * Test DOCX and PDF subsystem documents.
+
+   * Test date filtering.
+
+   * Verify matching and dashboard calculations.
+
+### First, let's inspect your actual files.
+
+I don't want to give you replacement code that accidentally removes something from your working application.
+
+Please share these three files:
+
+1. `subsystem_parser.py`
+
+2. `dashboard.py`
+
+3. `templates/index.html`
+
+You can upload them here or paste their contents.
+
+Also, please upload your actual subsystem configuration DOCX document. We need to build and verify the filename extraction against its real table layout, rather than guessing.
+
+We'll start with `subsystem_parser.py` and complete it first. Then we'll integrate everything into Flask, one file at a time.
+
+
+//////////////////////////////////////////////////////////////////////////
+
