@@ -557,3 +557,84 @@ We will then implement:
 For now, do only Steps 1–5.
 
 When you run `python test_subsystem_parser.py`, send me the terminal output. Then we can move to Flask integration without unnecessarily changing your existing working files.
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Great! 🎉 Your `subsystem_parser.py` test has completed successfully.
+
+The output indicates that:
+
+* 17 subsystems were extracted.
+
+* The parser completed without reporting an exception.
+
+* `subsystems.json` was generated.
+
+However, one thing: the values `[actual count]` and `[actual count]` look like placeholders in the output you pasted. We should verify the actual filename and warning counts before considering extraction fully validated.
+
+## Step 1. Check `subsystems.json`
+
+Open your project folder and confirm that this file exists:
+
+```
+subsystems.json
+```
+
+Open it. You should see something like:
+
+JSON
+
+```
+{
+    "POWER": [
+        "abc-abcd.tst",
+        "sample.sh"
+    ],
+    "MOTION": [
+        "motion.tst"
+    ]
+}
+```
+
+Your actual file should contain all 17 subsystems and their extracted filenames.
+
+## Step 2. What we do next
+
+Now we can move towards integrating the parser into your Flask application.
+
+| File                  | Next action                   |
+| --------------------- | ----------------------------- |
+| `subsystem_parser.py` | Keep                          |
+| `subsystems.json`     | Automatically generated       |
+| `app.py`              | Add subsystem document upload |
+| `dashboard.py`        | Connect subsystem matching    |
+| `index.html`          | Add DOCX/PDF upload field     |
+| `style.css`           | Style the upload field        |
+
+## Step 3. One thing I need from you
+
+Please share your current `app.py` code first.
+
+I will modify your existing code rather than replacing the entire application.
+
+Our next goal is:
+
+Instead of manually keeping `subsystem.docx` in the project folder, the user should upload the subsystem document directly through the dashboard.
+
+Then the application should automatically:
+
+1. Receive the uploaded DOCX/PDF.
+
+2. Pass it to the parser.
+
+3. Generate `subsystems.json`.
+
+4. Use that JSON for subsystem matching.
+
+5. Generate the dashboard.
+
+We'll preserve your existing PDF report processing and dashboard functionality.
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
