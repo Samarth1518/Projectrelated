@@ -1,0 +1,568 @@
+1. Expected project structure
+Your project should look like this:
+
+Satellite Testing Dashboard/
+│
+├── app.py
+├── main.py
+├── pdf_parser.py
+├── dashboard.py
+│
+├── subsystem_parser.py          NEW
+├── test_subsystem_parser.py     NEW
+├── test_docx.py                 OLD TEST FILE
+│
+├── subsystem.docx
+├── subsystems.json              GENERATED
+│
+├── templates/
+│   └── index.html
+│
+└── static/
+    └── style.css
+
+
+2. Create subsystem_parser.py
+
+This is the main implementation.
+
+It will:
+
+Read paragraphs and tables in document order.
+
+Identify all subsystem headings.
+
+Find the Filename column dynamically.
+
+Extract filenames from multiple tables.
+
+Combine repeated subsystem names.
+
+Reconstruct filenames split across lines.
+
+Filter .tst and .sh files.
+
+Remove duplicates.
+
+Generate subsystems.json.
+
+Preserve the previous JSON if parsing fails.
+
+Replace the contents of your new subsystem_parser.py with this complete code.
+
+
+code ------------
+
+import os
+import re
+import json
+import tempfile
+
+from docx import Document
+from docx.text.paragraph import Paragraph
+from docx.table import Table
+from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
+
+
+# --------------------------------------------------
+# 1. NORMALIZE TABLE HEADERS
+# --------------------------------------------------
+
+def normalize_header(value):
+    return re.sub(r"[\s.]+", "", value).lower()
+
+
+# --------------------------------------------------
+# 2. VALIDATE FILENAMES
+# --------------------------------------------------
+
+def is_valid_filename(filename):
+    """
+    Accept only .tst and .sh files.
+    """
+
+    filename = filename.strip()
+
+    if not filename:
+        return False
+
+    # Reject explanatory text and special markers.
+    if "(" in filename or ")" in filename:
+        return False
+
+    if ":" in filename:
+        return False
+
+    # Accept only .tst and .sh extensions.
+    pattern = r"^[A-Za-z0-9_.-]+\.(tst|sh)$"
+
+    return bool(re.match(pattern, filename, re.IGNORECASE))
+
+
+# --------------------------------------------------
+# 3. EXTRACT AND RECONSTRUCT FILENAMES
+# --------------------------------------------------
+
+def extract_filenames(cell_text, warnings=None, subsystem=None):
+
+    if not cell_text:
+        return []
+
+    # Separate entries using commas and semicolons.
+    text = cell_text.replace(",", "\n")
+    text = text.replace(";", "\n")
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    reconstructed = []
+
+    for line in lines:
+
+        # Do not remove internal spaces blindly.
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if reconstructed:
+
+            previous = reconstructed[-1]
+
+            # Join fragments of split filenames.
+            should_join = (
+                previous.endswith("-")
+                or previous.lower().endswith(".t")
+                or previous.lower().endswith(".s")
+            )
+
+            if should_join:
+                reconstructed[-1] += line
+                continue
+
+        reconstructed.append(line)
+
+    result = []
+    seen = set()
+
+    for filename in reconstructed:
+
+        filename = filename.strip()
+
+        if not is_valid_filename(filename):
+
+            if warnings is not None:
+                warnings.append({
+                    "subsystem": subsystem,
+                    "value": filename,
+                    "reason": "Does not match .tst/.sh filename filter"
+                })
+
+            continue
+
+        key = filename.lower()
+
+        # Remove duplicates without changing capitalization.
+        if key not in seen:
+            seen.add(key)
+            result.append(filename)
+
+    return result
+
+
+# --------------------------------------------------
+# 4. FIND SUBSYSTEM HEADING
+# --------------------------------------------------
+
+def extract_subsystem_name(text):
+
+    match = re.match(
+        r"^\s*Subsystem\s*:\s*(.*?)\s*$",
+        text,
+        re.IGNORECASE
+    )
+
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
+# --------------------------------------------------
+# 5. GET EXISTING SUBSYSTEM KEY
+# --------------------------------------------------
+
+def get_subsystem_key(subsystem_data, subsystem_name):
+
+    for existing_name in subsystem_data:
+
+        if existing_name.lower() == subsystem_name.lower():
+            return existing_name
+
+    return subsystem_name
+
+
+# --------------------------------------------------
+# 6. PARSE DOCX DOCUMENT
+# --------------------------------------------------
+
+def parse_subsystem_docx(file_path, warnings=None):
+
+    if warnings is None:
+        warnings = []
+
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(
+            "DOCX file not found: " + file_path
+        )
+
+    doc = Document(file_path)
+
+    subsystem_data = {}
+    current_subsystem = None
+
+    for element in doc.element.body.iterchildren():
+
+        # ------------------------------------------
+        # READ PARAGRAPHS
+        # ------------------------------------------
+
+        if isinstance(element, CT_P):
+
+            paragraph = Paragraph(element, doc)
+
+            text = paragraph.text.strip()
+
+            if not text:
+                continue
+
+            subsystem_name = extract_subsystem_name(text)
+
+            if subsystem_name:
+
+                if not subsystem_name:
+                    current_subsystem = None
+                    continue
+
+                current_subsystem = get_subsystem_key(
+                    subsystem_data,
+                    subsystem_name
+                )
+
+                subsystem_data.setdefault(
+                    current_subsystem, []
+                )
+
+                print("\nCURRENT SUBSYSTEM:", current_subsystem)
+
+        # ------------------------------------------
+        # READ TABLES
+        # ------------------------------------------
+
+        elif isinstance(element, CT_Tbl):
+
+            table = Table(element, doc)
+
+            if not current_subsystem:
+
+                warnings.append({
+                    "subsystem": None,
+                    "value": "Table found without subsystem heading",
+                    "reason": "Table skipped"
+                })
+
+                continue
+
+            print("\nTABLE FOUND:", current_subsystem)
+
+            filename_column = None
+            header_row = None
+
+            # Find Filename column dynamically.
+            for row_index, row in enumerate(table.rows):
+
+                values = [
+                    cell.text.strip()
+                    for cell in row.cells
+                ]
+
+                for column_index, value in enumerate(values):
+
+                    if normalize_header(value) == "filename":
+
+                        filename_column = column_index
+                        header_row = row_index
+                        break
+
+                if filename_column is not None:
+                    break
+
+            if filename_column is None:
+
+                warnings.append({
+                    "subsystem": current_subsystem,
+                    "value": "Filename column not found",
+                    "reason": "Table skipped"
+                })
+
+                print("WARNING: Filename column not found")
+
+                continue
+
+            print(
+                "Filename column:",
+                filename_column + 1
+            )
+
+            # Extract values below the header.
+            for row in table.rows[header_row + 1:]:
+
+                if filename_column >= len(row.cells):
+                    continue
+
+                cell_text = row.cells[filename_column].text
+
+                extracted = extract_filenames(
+                    cell_text,
+                    warnings,
+                    current_subsystem
+                )
+
+                for filename in extracted:
+
+                    existing = [
+                        item.lower()
+                        for item in subsystem_data[current_subsystem]
+                    ]
+
+                    if filename.lower() not in existing:
+
+                        subsystem_data[current_subsystem].append(
+                            filename
+                        )
+
+    return subsystem_data
+
+
+# --------------------------------------------------
+# 7. GENERATE JSON SAFELY
+# --------------------------------------------------
+
+def generate_subsystems_json(data, output_path="subsystems.json"):
+
+    if not isinstance(data, dict) or not data:
+        raise ValueError(
+            "No subsystem data found. Existing JSON was not changed."
+        )
+
+    # Validate the generated structure.
+    for subsystem, filenames in data.items():
+
+        if not subsystem or not isinstance(filenames, list):
+            raise ValueError("Invalid subsystem data")
+
+        for filename in filenames:
+
+            if not is_valid_filename(filename):
+                raise ValueError(
+                    "Invalid filename in output: " + filename
+                )
+
+    output_path = os.path.abspath(output_path)
+    output_dir = os.path.dirname(output_path)
+
+    temp_path = None
+
+    try:
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".tmp",
+            dir=output_dir,
+            delete=False
+        ) as temp_file:
+
+            json.dump(
+                data,
+                temp_file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+            temp_path = temp_file.name
+
+        # Verify temporary JSON before replacing old JSON.
+        with open(temp_path, "r", encoding="utf-8") as file:
+            verified_data = json.load(file)
+
+        if verified_data != data:
+            raise ValueError("Generated JSON validation failed")
+
+        # Replace previous JSON only after validation.
+        os.replace(temp_path, output_path)
+
+        print("\nJSON GENERATED SUCCESSFULLY:")
+        print(output_path)
+
+    except Exception:
+
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+        raise
+
+
+# --------------------------------------------------
+# 8. COMPLETE PROCESS
+# --------------------------------------------------
+
+def process_subsystem_document(
+    docx_path,
+    json_path="subsystems.json"
+):
+
+    warnings = []
+
+    data = parse_subsystem_docx(
+        docx_path,
+        warnings
+    )
+
+    if not data:
+        raise ValueError(
+            "No subsystem information extracted. JSON not generated."
+        )
+
+    total_files = sum(
+        len(files)
+        for files in data.values()
+    )
+
+    if total_files == 0:
+        raise ValueError(
+            "No valid .tst or .sh filenames found. JSON not generated."
+        )
+
+    generate_subsystems_json(
+        data,
+        json_path
+    )
+
+    return data, warnings
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+3. Create test_subsystem_parser.py
+
+This file will test the actual parser and generate the JSON.
+
+
+
+from subsystem_parser import process_subsystem_document
+
+
+# DOCX input file
+DOCX_FILE = "subsystem.docx"
+
+# JSON output file
+JSON_FILE = "subsystems.json"
+
+
+def main():
+
+    print("\n===================================")
+    print("   SUBSYSTEM PARSER TESTING")
+    print("===================================")
+
+    try:
+
+        data, warnings = process_subsystem_document(
+            DOCX_FILE,
+            JSON_FILE
+        )
+
+        print("\n========== FINAL SUBSYSTEM DATA ==========")
+
+        for subsystem, filenames in data.items():
+
+            print("\nSUBSYSTEM:", subsystem)
+
+            for filename in filenames:
+                print("   ", filename)
+
+        total_subsystems = len(data)
+
+        total_files = sum(
+            len(files)
+            for files in data.values()
+        )
+
+        print("\n===================================")
+        print("          FINAL SUMMARY")
+        print("===================================")
+
+        print("TOTAL SUBSYSTEMS:", total_subsystems)
+        print("TOTAL FILENAMES:", total_files)
+
+        print("TOTAL WARNINGS:", len(warnings))
+
+        if warnings:
+
+            print("\n========== WARNINGS ==========")
+
+            for warning in warnings:
+
+                print(
+                    "Subsystem:",
+                    warning["subsystem"]
+                )
+
+                print(
+                    "Value:",
+                    warning["value"]
+                )
+
+                print(
+                    "Reason:",
+                    warning["reason"]
+                )
+
+                print("--------------------------")
+
+        print("\nJSON FILE:", JSON_FILE)
+
+        print("\nPARSER TEST COMPLETED")
+
+    except Exception as error:
+
+        print("\nPARSER TEST FAILED")
+        print("ERROR:", error)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+Run the parser
+
+Make sure subsystem.docx is in the project folder.
+
+Run:
+
+python test_subsystem_parser.py
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
