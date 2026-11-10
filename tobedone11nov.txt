@@ -1,0 +1,3509 @@
+Yes. I'll give you the complete project files together, following the workflow we have finalised.
+
+Important: Your existing `main.py` and `pdf_parser.py` will remain exactly as they are. Do not replace or modify them.
+
+The new application will work like this:
+
+1. Enter project name.
+
+2. Upload multiple PDF reports.
+
+3. Upload the Word document containing subsystem tables.
+
+4. Select Overall or Filter by Date.
+
+5. Click Generate Dashboard.
+
+6. The application generates the JSON, generates `subsystems.json`, compares both, and displays the dashboard.
+
+All new submissions replace the previous submission's input files and generated results.
+
+# 1. Final project structure
+
+Create a folder called `visualisation` with this structure:
+
+```
+visualisation/
+│
+├── app.py
+├── main.py
+├── pdf_parser.py
+├── dashboard.py
+├── python_docx_parser.py
+├── subsystems.json
+│
+├── input/
+│
+├── output/
+│
+├── static/
+│   ├── chart.min.js
+│   └── style.css
+│
+└── templates/
+    └── index.html
+```
+
+You will receive the code for all the new files below.
+
+# 2. `python_docx_parser.py`
+
+New file
+
+This file reads the uploaded Word document and extracts:
+
+* Subsystem names.
+
+* Filenames from the third column of each subsystem table.
+
+* Only one occurrence of each filename within a subsystem.
+
+* Subsystem names as the JSON keys.
+
+It generates `subsystems.json` automatically.
+
+Python
+
+```
+# python_docx_parser.py
+# Extract subsystem names and filenames from a Word document.
+# Compatible with Python 3.6.5 and python-docx.
+
+import os
+import re
+import json
+
+from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+SUBSYSTEM_FILE = os.path.join(
+    BASE_DIR,
+    "subsystems.json"
+)
+
+
+def clean_text(value):
+    """Clean text extracted from Word."""
+
+    value = str(value or "").strip()
+    value = re.sub(r"\s+", " ", value)
+
+    return value
+
+
+def clean_filename(value):
+    """Extract a filename from a table cell."""
+
+    value = clean_text(value)
+
+    value = re.sub(
+        r"^\s*[\d.)\-•]+\s*",
+        "",
+        value
+    )
+
+    value = value.strip('"\' ')
+
+    return value
+
+
+def get_cell_text(cell):
+    """Read all text from a table cell."""
+
+    parts = []
+
+    for paragraph in cell.paragraphs:
+
+        text = clean_text(paragraph.text)
+
+        if text:
+            parts.append(text)
+
+    return " ".join(parts)
+
+
+def get_document_elements(document):
+    """
+    Read paragraphs and tables in their original document order.
+    """
+
+    body = document.element.body
+
+    for element in body.iterchildren():
+
+        if element.tag.endswith("}p"):
+
+            yield Paragraph(element, document)
+
+        elif element.tag.endswith("}tbl"):
+
+            yield Table(element, document)
+
+
+def extract_subsystems(docx_path):
+    """
+    Extract subsystem names and filenames from tables.
+
+    Expected layout:
+
+        Subsystem Name
+
+        Table:
+        Column 1 | Column 2 | Filename
+    """
+
+    if not os.path.isfile(docx_path):
+
+        raise FileNotFoundError(
+            "Word document not found: " + docx_path
+        )
+
+    document = Document(docx_path)
+
+    subsystems = {}
+
+    current_subsystem = None
+
+    for element in get_document_elements(document):
+
+        # Read paragraphs before tables.
+
+        if isinstance(element, Paragraph):
+
+            text = clean_text(element.text)
+
+            if text:
+                current_subsystem = text
+
+            continue
+
+        # Process tables.
+
+        if isinstance(element, Table):
+
+            if not current_subsystem:
+                continue
+
+            if current_subsystem not in subsystems:
+
+                subsystems[current_subsystem] = []
+
+            filenames = subsystems[current_subsystem]
+
+            # Third column = index 2.
+
+            for row in element.rows:
+
+                if len(row.cells) < 3:
+                    continue
+
+                filename = clean_filename(
+                    get_cell_text(row.cells[2])
+                )
+
+                if not filename:
+                    continue
+
+                # Ignore table headings.
+
+                if filename.lower() in [
+                    "filename",
+                    "file name",
+                    "file names",
+                    "procedure name",
+                    "procedure filename"
+                ]:
+
+                    continue
+
+                # Keep one occurrence within each subsystem.
+
+                if filename not in filenames:
+
+                    filenames.append(filename)
+
+    # Remove empty subsystem entries.
+
+    subsystems = {
+        name: filenames
+        for name, filenames in subsystems.items()
+        if filenames
+    }
+
+    if not subsystems:
+
+        raise ValueError(
+            "No subsystem tables or filenames were detected. "
+            "Check that subsystem names appear above their tables "
+            "and filenames are in the third column."
+        )
+
+    return subsystems
+
+
+def save_subsystems(subsystems):
+
+    temporary_file = SUBSYSTEM_FILE + ".tmp"
+
+    try:
+
+        with open(
+            temporary_file,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                subsystems,
+                file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+            file.write("\n")
+
+        os.rename(
+            temporary_file,
+            SUBSYSTEM_FILE
+        )
+
+    except Exception:
+
+        if os.path.exists(temporary_file):
+            os.remove(temporary_file)
+
+        raise
+
+    return SUBSYSTEM_FILE
+
+
+def process_word_document(docx_path):
+
+    subsystems = extract_subsystems(docx_path)
+
+    output_path = save_subsystems(subsystems)
+
+    return subsystems, output_path
+```
+
+Important Word document format
+
+Your Word document should follow this arrangement:
+
+```
+Power Subsystem
+
++-----------+-----------+----------------------+
+| Column 1  | Column 2  | Column 3             |
++-----------+-----------+----------------------+
+| ...       | ...       | example.tst          |
+| ...       | ...       | power_check.tst      |
+| ...       | ...       | power_start.tst      |
++-----------+-----------+----------------------+
+
+Thermal Subsystem
+
++-----------+-----------+----------------------+
+| Column 1  | Column 2  | Column 3             |
++-----------+-----------+----------------------+
+| ...       | ...       | thermal_check.tst    |
+| ...       | ...       | cooling_test.tst     |
++-----------+-----------+----------------------+
+```
+
+The parser reads the third column only.
+
+# 3. `dashboard.py`
+
+Replace existing dashboard.py
+
+This is the main dashboard-processing logic.
+
+It will:
+
+* Read the generated JSON.
+
+* Read the subsystem configuration.
+
+* Match filenames with procedure names.
+
+* Ignore file extensions during matching.
+
+* Use 90% similarity matching.
+
+* Identify ambiguous matches.
+
+* Allow the same filename to belong to different subsystems.
+
+* Keep only the latest execution for each procedure.
+
+* Support Overall and Filter by Date.
+
+* Calculate Success and Failure percentages.
+
+* Identify unassigned procedures.
+
+Python
+
+```
+# dashboard.py
+# Dashboard processing logic.
+# Compatible with Python 3.6.5.
+
+import json
+import os
+import re
+import difflib
+
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+SIMILARITY_THRESHOLD = 0.90
+
+
+# --------------------------------------------------
+# 1. NORMALIZE FILENAMES
+# --------------------------------------------------
+
+def normalize_name(name):
+
+    name = os.path.basename(str(name)).strip().lower()
+
+    # Remove file extensions.
+
+    name = os.path.splitext(name)[0]
+
+    # Remove spaces.
+
+    name = re.sub(r"\s+", "", name)
+
+    return name
+
+
+# --------------------------------------------------
+# 2. SIMILARITY
+# --------------------------------------------------
+
+def similarity_score(name1, name2):
+
+    return difflib.SequenceMatcher(
+        None,
+        normalize_name(name1),
+        normalize_name(name2)
+    ).ratio()
+
+
+# --------------------------------------------------
+# 3. PARSE DATETIME
+# --------------------------------------------------
+
+def parse_datetime(value):
+
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S"
+    ]
+
+    for date_format in formats:
+
+        try:
+
+            return datetime.strptime(
+                str(value).strip(),
+                date_format
+            )
+
+        except (ValueError, TypeError):
+
+            continue
+
+    return None
+
+
+# --------------------------------------------------
+# 4. FIND BEST MATCH
+# --------------------------------------------------
+
+def find_best_match(target_name, json_names):
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) == 1:
+
+        return exact_matches[0], "exact"
+
+    if len(exact_matches) > 1:
+
+        return None, "ambiguous"
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+
+        return None, "unmatched"
+
+    highest_score = max(
+        item[1] for item in scored_matches
+    )
+
+    best_matches = [
+        item[0]
+        for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+    if len(best_matches) != 1:
+
+        return None, "ambiguous"
+
+    return best_matches[0], "similar"
+
+
+# --------------------------------------------------
+# 5. GET LATEST EXECUTION
+# --------------------------------------------------
+
+def get_latest_execution(procedure_data, start_date=None,
+                         end_date=None):
+
+    executions = procedure_data.get(
+        "procedures", []
+    )
+
+    valid_executions = []
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time", "")
+        )
+
+        if execution_date is None:
+            continue
+
+        # Apply date filtering BEFORE selecting latest.
+
+        if start_date and execution_date < start_date:
+            continue
+
+        if end_date and execution_date > end_date:
+            continue
+
+        valid_executions.append(
+            (execution_date, execution)
+        )
+
+    if not valid_executions:
+
+        return None
+
+    valid_executions.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+    return valid_executions[0][1]
+
+
+# --------------------------------------------------
+# 6. GET DATE RANGE
+# --------------------------------------------------
+
+def get_date_range(json_procedures, start_date=None,
+                   end_date=None):
+
+    all_dates = []
+
+    for procedure_data in json_procedures.values():
+
+        executions = procedure_data.get(
+            "procedures", []
+        )
+
+        for execution in executions:
+
+            if not isinstance(execution, dict):
+                continue
+
+            execution_date = parse_datetime(
+                execution.get("date_time", "")
+            )
+
+            if execution_date is None:
+                continue
+
+            if start_date and execution_date < start_date:
+                continue
+
+            if end_date and execution_date > end_date:
+                continue
+
+            all_dates.append(execution_date)
+
+    if not all_dates:
+
+        return "Date range unavailable"
+
+    return (
+        min(all_dates).strftime("%d-%m-%Y")
+        + " to "
+        + max(all_dates).strftime("%d-%m-%Y")
+    )
+
+
+# --------------------------------------------------
+# 7. PROCESS DASHBOARD
+# --------------------------------------------------
+
+def process_dashboard(
+    json_path,
+    subsystems,
+    project_name="",
+    date_mode="overall",
+    start_date=None,
+    end_date=None
+):
+
+    with open(
+        json_path,
+        "r",
+        encoding="utf-8"
+    ) as file:
+
+        json_data = json.load(file)
+
+    if not isinstance(json_data, dict):
+
+        raise ValueError("Invalid JSON structure.")
+
+    json_procedures = {
+        name: data
+        for name, data in json_data.items()
+        if name != "Insights"
+        and isinstance(data, dict)
+    }
+
+    json_names = list(json_procedures.keys())
+
+    # Date range.
+
+    date_range = get_date_range(
+        json_procedures,
+        start_date,
+        end_date
+    )
+
+    results = []
+
+    assigned_names = set()
+    reserved_names = set()
+
+    # --------------------------------------------------
+    # PROCESS EVERY SUBSYSTEM
+    # --------------------------------------------------
+
+    for subsystem_name, configured_names in subsystems.items():
+
+        success_names = []
+        failure_names = []
+        unmatched_names = []
+        ambiguous_names = []
+
+        # Remove duplicate filenames within a subsystem.
+
+        configured_names = list(
+            dict.fromkeys(configured_names)
+        )
+
+        for configured_name in configured_names:
+
+            matched_name, match_type = find_best_match(
+                configured_name,
+                json_names
+            )
+
+            if matched_name is None:
+
+                if match_type == "ambiguous":
+
+                    ambiguous_names.append(configured_name)
+
+                    target = normalize_name(configured_name)
+
+                    candidates = []
+
+                    for name in json_names:
+
+                        score = similarity_score(
+                            configured_name,
+                            name
+                        )
+
+                        if score >= SIMILARITY_THRESHOLD:
+                            candidates.append((name, score))
+
+                    if candidates:
+
+                        highest = max(
+                            item[1] for item in candidates
+                        )
+
+                        for name, score in candidates:
+
+                            if abs(score - highest) < 0.000001:
+                                reserved_names.add(name)
+
+                else:
+
+                    unmatched_names.append(configured_name)
+
+                continue
+
+            latest = get_latest_execution(
+                json_procedures[matched_name],
+                start_date,
+                end_date
+            )
+
+            # No execution in selected date range.
+
+            if latest is None:
+
+                unmatched_names.append(configured_name)
+                continue
+
+            final_status = str(
+                latest.get("final_status", "")
+            ).strip().lower()
+
+            # Count each JSON procedure only once per subsystem.
+
+            assigned_names.add(matched_name)
+
+            if final_status == "success":
+
+                success_names.append(configured_name)
+
+            elif final_status == "failure":
+
+                failure_names.append(configured_name)
+
+            else:
+
+                unmatched_names.append(configured_name)
+
+        success_count = len(success_names)
+        failure_count = len(failure_names)
+
+        total = success_count + failure_count
+
+        success_percentage = (
+            round(success_count * 100.0 / total, 2)
+            if total else 0
+        )
+
+        failure_percentage = (
+            round(failure_count * 100.0 / total, 2)
+            if total else 0
+        )
+
+        results.append({
+
+            "name": subsystem_name,
+
+            "success": success_names,
+            "failure": failure_names,
+
+            "unmatched": unmatched_names,
+            "ambiguous": ambiguous_names,
+
+            "success_count": success_count,
+            "failure_count": failure_count,
+
+            "unmatched_count": len(unmatched_names),
+            "ambiguous_count": len(ambiguous_names),
+
+            "total": total,
+
+            "success_percentage": success_percentage,
+            "failure_percentage": failure_percentage
+
+        })
+
+    # --------------------------------------------------
+    # 8. UNASSIGNED PROCEDURES
+    # --------------------------------------------------
+
+    unassigned_success = []
+    unassigned_failure = []
+
+    for procedure_name, procedure_data in json_procedures.items():
+
+        if procedure_name in assigned_names:
+            continue
+
+        if procedure_name in reserved_names:
+            continue
+
+        latest = get_latest_execution(
+            procedure_data,
+            start_date,
+            end_date
+        )
+
+        if latest is None:
+            continue
+
+        final_status = str(
+            latest.get("final_status", "")
+        ).strip().lower()
+
+        if final_status == "success":
+
+            unassigned_success.append(procedure_name)
+
+        elif final_status == "failure":
+
+            unassigned_failure.append(procedure_name)
+
+    unassigned_procedures = {
+
+        "success": unassigned_success,
+
+        "failure": unassigned_failure,
+
+        "success_count": len(unassigned_success),
+
+        "failure_count": len(unassigned_failure),
+
+        "total": (
+            len(unassigned_success)
+            + len(unassigned_failure)
+        )
+
+    }
+
+    # --------------------------------------------------
+    # 9. FINAL RESULT
+    # --------------------------------------------------
+
+    return {
+
+        "project_name": project_name,
+
+        "date_range": date_range,
+
+        "date_mode": date_mode,
+
+        "subsystems": results,
+
+        "unassigned_procedures": unassigned_procedures
+
+    }
+```
+
+# 4. `app.py`
+
+Replace existing app.py
+
+This file coordinates the entire application.
+
+It handles:
+
+* Project name.
+
+* Multiple PDF uploads.
+
+* Word document upload.
+
+* PDF conversion.
+
+* Word document conversion.
+
+* JSON generation.
+
+* Date selection.
+
+* Dashboard generation.
+
+* Replacement of previous uploaded files.
+
+Python
+
+```
+# app.py
+# Flask application for Satellite Testing Dashboard.
+# Compatible with Python 3.6.5.
+
+import os
+import glob
+import subprocess
+import sys
+import shutil
+
+from datetime import datetime, time
+
+from flask import (
+    Flask,
+    render_template,
+    request,
+    flash
+)
+
+from werkzeug.utils import secure_filename
+
+from dashboard import process_dashboard
+
+from python_docx_parser import process_word_document
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+UPLOAD_FOLDER = os.path.join(
+    BASE_DIR,
+    "uploaded_word"
+)
+
+ALLOWED_PDF = set(["pdf"])
+ALLOWED_DOCX = set(["docx"])
+
+
+app = Flask(__name__)
+
+app.secret_key = "satellite_dashboard_local_key"
+
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
+
+
+# --------------------------------------------------
+# 1. CREATE FOLDERS
+# --------------------------------------------------
+
+def create_folders():
+
+    for folder in [
+        INPUT_DIR,
+        OUTPUT_DIR,
+        UPLOAD_FOLDER
+    ]:
+
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+
+# --------------------------------------------------
+# 2. FILE VALIDATION
+# --------------------------------------------------
+
+def allowed_file(filename, extensions):
+
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower()
+        in extensions
+    )
+
+
+# --------------------------------------------------
+# 3. CLEAR PREVIOUS FILES
+# --------------------------------------------------
+
+def clear_folder(folder):
+
+    if not os.path.isdir(folder):
+        return
+
+    for filename in os.listdir(folder):
+
+        path = os.path.join(folder, filename)
+
+        if os.path.isfile(path):
+
+            os.remove(path)
+
+        elif os.path.isdir(path):
+
+            shutil.rmtree(path)
+
+
+def clear_previous_files():
+
+    clear_folder(INPUT_DIR)
+    clear_folder(OUTPUT_DIR)
+    clear_folder(UPLOAD_FOLDER)
+
+    subsystems_path = os.path.join(
+        BASE_DIR,
+        "subsystems.json"
+    )
+
+    if os.path.isfile(subsystems_path):
+
+        os.remove(subsystems_path)
+
+
+# --------------------------------------------------
+# 4. RUN PDF CONVERTER
+# --------------------------------------------------
+
+def run_pdf_converter():
+
+    main_path = os.path.join(
+        BASE_DIR,
+        "main.py"
+    )
+
+    result = subprocess.run(
+
+        [sys.executable, main_path],
+
+        cwd=BASE_DIR,
+
+        stdout=subprocess.PIPE,
+
+        stderr=subprocess.PIPE,
+
+        universal_newlines=True
+    )
+
+    if result.returncode != 0:
+
+        raise RuntimeError(
+            result.stderr
+            or result.stdout
+            or "PDF conversion failed."
+        )
+
+    return result.stdout
+
+
+# --------------------------------------------------
+# 5. GET GENERATED JSON
+# --------------------------------------------------
+
+def get_latest_json():
+
+    files = glob.glob(
+        os.path.join(
+            OUTPUT_DIR,
+            "output_*.json"
+        )
+    )
+
+    if not files:
+        return None
+
+    return max(
+        files,
+        key=os.path.getmtime
+    )
+
+
+# --------------------------------------------------
+# 6. MAIN ROUTE
+# --------------------------------------------------
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+
+    create_folders()
+
+    dashboard_data = None
+    project_name = ""
+
+    if request.method == "POST":
+
+        project_name = request.form.get(
+            "project_name",
+            ""
+        ).strip()
+
+        pdf_files = request.files.getlist(
+            "pdf_files"
+        )
+
+        word_file = request.files.get(
+            "word_file"
+        )
+
+        date_mode = request.form.get(
+            "date_mode",
+            "overall"
+        )
+
+        start_date = None
+        end_date = None
+
+        # ------------------------------------------
+        # VALIDATE PROJECT NAME
+        # ------------------------------------------
+
+        if not project_name:
+
+            flash("Please enter a project name.")
+
+        # ------------------------------------------
+        # VALIDATE DATE MODE
+        # ------------------------------------------
+
+        elif date_mode not in ["overall", "filtered"]:
+
+            flash("Invalid date selection.")
+
+        elif date_mode == "filtered":
+
+            try:
+
+                start_text = request.form.get(
+                    "start_date",
+                    ""
+                )
+
+                end_text = request.form.get(
+                    "end_date",
+                    ""
+                )
+
+                if not start_text or not end_text:
+
+                    raise ValueError(
+                        "Please select both start and end dates."
+                    )
+
+                start_date = datetime.combine(
+                    datetime.strptime(
+                        start_text,
+                        "%Y-%m-%d"
+                    ).date(),
+                    time.min
+                )
+
+                end_date = datetime.combine(
+                    datetime.strptime(
+                        end_text,
+                        "%Y-%m-%d"
+                    ).date(),
+                    time.max
+                )
+
+                if start_date > end_date:
+
+                    raise ValueError(
+                        "Start date cannot be after end date."
+                    )
+
+            except ValueError as error:
+
+                flash(str(error))
+
+                return render_template(
+                    "index.html",
+                    dashboard_data=None,
+                    project_name=project_name
+                )
+
+        # ------------------------------------------
+        # VALIDATE PDF FILES
+        # ------------------------------------------
+
+        valid_pdfs = [
+            file for file in pdf_files
+            if file
+            and file.filename
+            and allowed_file(file.filename, ALLOWED_PDF)
+        ]
+
+        if not valid_pdfs:
+
+            flash("Please upload at least one valid PDF file.")
+
+        elif not word_file or not word_file.filename:
+
+            flash("Please upload the subsystem Word document.")
+
+        elif not allowed_file(
+            word_file.filename,
+            ALLOWED_DOCX
+        ):
+
+            flash("Only .docx Word documents are supported.")
+
+        else:
+
+            try:
+
+                # ----------------------------------
+                # CLEAR PREVIOUS SUBMISSION
+                # ----------------------------------
+
+                clear_previous_files()
+
+                # ----------------------------------
+                # SAVE PDF FILES
+                # ----------------------------------
+
+                saved_count = 0
+                used_names = set()
+
+                for uploaded_file in valid_pdfs:
+
+                    filename = secure_filename(
+                        uploaded_file.filename
+                    )
+
+                    if not filename:
+                        continue
+
+                    if filename.lower() in used_names:
+
+                        raise RuntimeError(
+                            "Duplicate PDF filename detected: "
+                            + filename
+                        )
+
+                    used_names.add(filename.lower())
+
+                    save_path = os.path.join(
+                        INPUT_DIR,
+                        filename
+                    )
+
+                    uploaded_file.save(save_path)
+
+                    saved_count += 1
+
+                if saved_count == 0:
+
+                    raise RuntimeError(
+                        "No PDF files could be saved."
+                    )
+
+                # ----------------------------------
+                # SAVE WORD DOCUMENT
+                # ----------------------------------
+
+                word_filename = secure_filename(
+                    word_file.filename
+                )
+
+                if not word_filename:
+
+                    raise RuntimeError(
+                        "Invalid Word document filename."
+                    )
+
+                word_path = os.path.join(
+                    UPLOAD_FOLDER,
+                    word_filename
+                )
+
+                word_file.save(word_path)
+
+                # ----------------------------------
+                # GENERATE SUBSYSTEMS.JSON
+                # ----------------------------------
+
+                subsystems, subsystem_path = (
+                    process_word_document(word_path)
+                )
+
+                # ----------------------------------
+                # GENERATE PDF JSON
+                # ----------------------------------
+
+                converter_message = run_pdf_converter()
+
+                json_path = get_latest_json()
+
+                if json_path is None:
+
+                    raise RuntimeError(
+                        "The PDF converter did not generate JSON."
+                    )
+
+                # ----------------------------------
+                # GENERATE DASHBOARD
+                # ----------------------------------
+
+                dashboard_data = process_dashboard(
+
+                    json_path,
+
+                    subsystems,
+
+                    project_name,
+
+                    date_mode,
+
+                    start_date,
+
+                    end_date
+
+                )
+
+                flash(
+                    str(saved_count)
+                    + " PDF file(s), Word document and JSON "
+                    + "processed successfully."
+                )
+
+            except Exception as error:
+
+                dashboard_data = None
+
+                flash(
+                    "Error: " + str(error)
+                )
+
+    return render_template(
+
+        "index.html",
+
+        dashboard_data=dashboard_data,
+
+        project_name=project_name
+
+    )
+
+
+# --------------------------------------------------
+# 7. RUN APPLICATION
+# --------------------------------------------------
+
+if __name__ == "__main__":
+
+    create_folders()
+
+    print("=" * 50)
+
+    print("SATELLITE TESTING DASHBOARD")
+
+    print("=" * 50)
+
+    print(
+        "Open http://127.0.0.1:5000 in your browser."
+    )
+
+    print("Press CTRL+C to stop.")
+
+    app.run(
+
+        host="127.0.0.1",
+
+        port=5000,
+
+        debug=False
+
+    )
+```
+
+Note: The code intentionally clears the previous generated output when a new submission starts. This prevents an old JSON file from being accidentally used if the new PDF conversion fails.
+
+# 5. `templates/index.html`
+
+Replace existing index.html
+
+This is the complete interface with both upload sections and the two date options.
+
+The dashboard appears below the upload section after successful processing.
+
+HTML
+
+```
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Satellite Testing Dashboard</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+
+    <script src="{{ url_for('static', filename='chart.min.js') }}"></script>
+
+</head>
+
+<body>
+
+<div class="page-container">
+
+    <!-- HEADER -->
+
+    <header class="header">
+
+        <h1>Satellite Testing Dashboard</h1>
+
+        <p>
+            Subsystem-wise testing status and analysis
+        </p>
+
+    </header>
+
+
+    <main>
+
+        <!-- UPLOAD SECTION -->
+
+        <section class="upload-section">
+
+            <h2>Generate Testing Dashboard</h2>
+
+            <p>
+                Enter project details, upload test reports,
+                upload the subsystem document and select
+                the required execution date range.
+            </p>
+
+
+            <form method="POST"
+                  action="/"
+                  enctype="multipart/form-data">
+
+
+                <!-- PROJECT NAME -->
+
+                <div class="form-group">
+
+                    <label for="project_name">
+                        1. Project Name
+                    </label>
+
+                    <input type="text"
+                           id="project_name"
+                           name="project_name"
+                           placeholder="Enter project name"
+                           value="{{ project_name or '' }}"
+                           required>
+
+                </div>
+
+
+                <!-- PDF UPLOAD -->
+
+                <div class="form-group">
+
+                    <label>
+                        2. Upload PDF Test Reports
+                    </label>
+
+                    <p class="field-description">
+                        Upload multiple PDF reports for
+                        JSON generation.
+                    </p>
+
+                    <div class="upload-box">
+
+                        <input type="file"
+                               id="pdf_files"
+                               name="pdf_files"
+                               accept=".pdf,application/pdf"
+                               multiple
+                               required>
+
+                        <label for="pdf_files"
+                               class="file-label">
+
+                            Select PDF Files
+
+                        </label>
+
+                        <p id="pdf-file-names">
+                            No PDF files selected
+                        </p>
+
+                    </div>
+
+                </div>
+
+
+                <!-- WORD DOCUMENT UPLOAD -->
+
+                <div class="form-group">
+
+                    <label>
+                        3. Upload Subsystem Word Document
+                    </label>
+
+                    <p class="field-description">
+                        Upload the DOCX document containing
+                        subsystem names and filenames in
+                        the third column.
+                    </p>
+
+                    <div class="upload-box">
+
+                        <input type="file"
+                               id="word_file"
+                               name="word_file"
+                               accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                               required>
+
+                        <label for="word_file"
+                               class="file-label">
+
+                            Select Word Document
+
+                        </label>
+
+                        <p id="word-file-name">
+                            No Word document selected
+                        </p>
+
+                    </div>
+
+                </div>
+
+
+                <!-- DATE SELECTION -->
+
+                <div class="form-group">
+
+                    <label>
+                        4. Select Execution Date
+                    </label>
+
+                    <div class="date-options">
+
+                        <label class="date-option">
+
+                            <input type="radio"
+                                   name="date_mode"
+                                   value="overall"
+                                   checked
+                                   onchange="toggleDateFilter()">
+
+                            <span>
+
+                                <strong>Overall</strong>
+
+                                <small>
+                                    Consider all execution
+                                    records from the JSON.
+                                </small>
+
+                            </span>
+
+                        </label>
+
+
+                        <label class="date-option">
+
+                            <input type="radio"
+                                   name="date_mode"
+                                   value="filtered"
+                                   onchange="toggleDateFilter()">
+
+                            <span>
+
+                                <strong>Filter by Date</strong>
+
+                                <small>
+                                    Select a start date and
+                                    end date.
+                                </small>
+
+                            </span>
+
+                        </label>
+
+                    </div>
+
+
+                    <!-- DATE FILTER -->
+
+                    <div id="date-filter"
+                         class="date-filter"
+                         style="display:none;">
+
+                        <div class="date-field">
+
+                            <label for="start_date">
+                                Start Date
+                            </label>
+
+                            <input type="date"
+                                   id="start_date"
+                                   name="start_date">
+
+                        </div>
+
+
+                        <div class="date-field">
+
+                            <label for="end_date">
+                                End Date
+                            </label>
+
+                            <input type="date"
+                                   id="end_date"
+                                   name="end_date">
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <!-- GENERATE BUTTON -->
+
+                <button type="submit"
+                        class="upload-button">
+
+                    Generate Dashboard
+
+                </button>
+
+
+            </form>
+
+
+            <!-- FLASH MESSAGES -->
+
+            {% with messages = get_flashed_messages() %}
+
+                {% if messages %}
+
+                    <div class="messages">
+
+                        {% for message in messages %}
+
+                            <p>{{ message }}</p>
+
+                        {% endfor %}
+
+                    </div>
+
+                {% endif %}
+
+            {% endwith %}
+
+        </section>
+
+
+        <!-- DASHBOARD -->
+
+        {% if dashboard_data is not none %}
+
+        <section class="dashboard-section">
+
+
+            <!-- PROJECT HEADING -->
+
+            <div class="project-heading">
+
+                <div class="project-title">
+
+                    <h2>
+                        {{ dashboard_data.project_name }}
+                        Project Overview
+                    </h2>
+
+                    <p>
+                        Latest execution status for each
+                        configured procedure
+                    </p>
+
+                </div>
+
+
+                <div class="project-date">
+
+                    <span>Execution Date Range</span>
+
+                    <strong>
+                        {{ dashboard_data.date_range }}
+                    </strong>
+
+                    <span class="date-mode-label">
+
+                        {% if dashboard_data.date_mode == "overall" %}
+
+                            Overall
+
+                        {% else %}
+
+                            Filtered
+
+                        {% endif %}
+
+                    </span>
+
+                </div>
+
+            </div>
+
+
+            <!-- SUBSYSTEM CHART -->
+
+            <div class="section-heading">
+
+                <h2>Subsystem Testing Overview</h2>
+
+            </div>
+
+
+            <div class="legend">
+
+                <span>
+
+                    <span class="legend-color success-color"></span>
+
+                    Success
+
+                </span>
+
+
+                <span>
+
+                    <span class="legend-color failure-color"></span>
+
+                    Failure
+
+                </span>
+
+            </div>
+
+
+            <div class="chart-container">
+
+                <canvas id="subsystemChart"></canvas>
+
+            </div>
+
+
+            <!-- SUBSYSTEM DETAILS -->
+
+            <h2 class="details-heading">
+                Subsystem Details
+            </h2>
+
+
+            <div class="subsystem-grid">
+
+                {% for subsystem in dashboard_data.subsystems %}
+
+                <div class="subsystem-card">
+
+                    <h3>{{ subsystem.name }}</h3>
+
+
+                    <div class="status-row">
+
+                        <span class="success-text">
+                            Success
+                        </span>
+
+                        <strong>
+                            {{ subsystem.success_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <div class="status-row">
+
+                        <span class="failure-text">
+                            Failure
+                        </span>
+
+                        <strong>
+                            {{ subsystem.failure_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <div class="status-row">
+
+                        <span>Unmatched</span>
+
+                        <strong>
+                            {{ subsystem.unmatched_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <div class="status-row">
+
+                        <span>Ambiguous</span>
+
+                        <strong>
+                            {{ subsystem.ambiguous_count }}
+                        </strong>
+
+                    </div>
+
+
+                    <div class="percentage-row">
+
+                        <span class="success-text">
+                            Success:
+                            {{ subsystem.success_percentage }}%
+                        </span>
+
+                        <span class="failure-text">
+                            Failure:
+                            {{ subsystem.failure_percentage }}%
+                        </span>
+
+                    </div>
+
+
+                    <details>
+
+                        <summary>
+                            View procedure names
+                        </summary>
+
+
+                        <h4>Successful procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.success %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Failed procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.failure %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Unmatched procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.unmatched %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Ambiguous procedures</h4>
+
+                        <ul>
+
+                            {% for name in subsystem.ambiguous %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+                    </details>
+
+                </div>
+
+                {% endfor %}
+
+            </div>
+
+
+            <!-- UNASSIGNED PROCEDURES -->
+
+            <h2 class="details-heading">
+                Other Procedures
+            </h2>
+
+
+            <div class="unassigned-grid">
+
+                <div class="unassigned-card">
+
+                    <h3>Unassigned Procedures</h3>
+
+
+                    <div class="status-row">
+
+                        <span class="success-text">
+                            Success
+                        </span>
+
+                        <strong class="success-text">
+
+                            {{ dashboard_data.unassigned_procedures.success_count }}
+
+                        </strong>
+
+                    </div>
+
+
+                    <div class="status-row">
+
+                        <span class="failure-text">
+                            Failure
+                        </span>
+
+                        <strong class="failure-text">
+
+                            {{ dashboard_data.unassigned_procedures.failure_count }}
+
+                        </strong>
+
+                    </div>
+
+
+                    <details>
+
+                        <summary>
+                            View procedure names
+                        </summary>
+
+
+                        <h4>Successful procedures</h4>
+
+                        <ul>
+
+                            {% for name in dashboard_data.unassigned_procedures.success %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+
+                        <h4>Failed procedures</h4>
+
+                        <ul>
+
+                            {% for name in dashboard_data.unassigned_procedures.failure %}
+
+                                <li>{{ name }}</li>
+
+                            {% else %}
+
+                                <li>None</li>
+
+                            {% endfor %}
+
+                        </ul>
+
+                    </details>
+
+                </div>
+
+            </div>
+
+
+        </section>
+
+        {% endif %}
+
+    </main>
+
+
+    <footer>
+
+        Satellite Testing Dashboard
+
+    </footer>
+
+</div>
+
+
+<!-- CHART GENERATION -->
+
+{% if dashboard_data is not none %}
+
+<script>
+
+    const dashboardData =
+        {{ dashboard_data.subsystems | tojson }};
+
+
+    const labels = dashboardData.map(
+        item => item.name
+    );
+
+
+    const successCounts = dashboardData.map(
+        item => item.success_count
+    );
+
+
+    const failureCounts = dashboardData.map(
+        item => item.failure_count
+    );
+
+
+    const successNames = dashboardData.map(
+        item => item.success
+    );
+
+
+    const failureNames = dashboardData.map(
+        item => item.failure
+    );
+
+
+    const ctx = document.getElementById(
+        'subsystemChart'
+    ).getContext('2d');
+
+
+    new Chart(ctx, {
+
+        type: 'bar',
+
+        data: {
+
+            labels: labels,
+
+            datasets: [
+
+                {
+
+                    label: 'Success',
+
+                    data: successCounts,
+
+                    backgroundColor: '#269B59',
+
+                    successNames: successNames
+
+                },
+
+                {
+
+                    label: 'Failure',
+
+                    data: failureCounts,
+
+                    backgroundColor: '#D94B4B',
+
+                    failureNames: failureNames
+
+                }
+
+            ]
+
+        },
+
+        options: {
+
+            responsive: true,
+
+            maintainAspectRatio: false,
+
+            scales: {
+
+                x: {
+
+                    stacked: true,
+
+                    title: {
+
+                        display: true,
+
+                        text: 'Subsystems'
+
+                    }
+
+                },
+
+                y: {
+
+                    stacked: true,
+
+                    beginAtZero: true,
+
+                    ticks: {
+
+                        precision: 0
+
+                    },
+
+                    title: {
+
+                        display: true,
+
+                        text: 'Number of Procedures'
+
+                    }
+
+                }
+
+            },
+
+            plugins: {
+
+                legend: {
+
+                    position: 'top'
+
+                },
+
+                tooltip: {
+
+                    callbacks: {
+
+                        label: function(context) {
+
+                            const dataset = context.dataset;
+
+                            const count = context.raw;
+
+                            let names = [];
+
+                            if (dataset.label === 'Success') {
+
+                                names = dataset.successNames[
+                                    context.dataIndex
+                                ];
+
+                            }
+
+                            if (dataset.label === 'Failure') {
+
+                                names = dataset.failureNames[
+                                    context.dataIndex
+                                ];
+
+                            }
+
+                            let result = [
+                                dataset.label + ': ' + count
+                            ];
+
+                            names.forEach(function(name) {
+
+                                result.push('  ' + name);
+
+                            });
+
+                            return result;
+
+                        }
+
+                    }
+
+                }
+
+            }
+
+        }
+
+    });
+
+</script>
+
+{% endif %}
+
+
+<!-- FILE SELECTION -->
+
+<script>
+
+    document.getElementById('pdf_files').addEventListener(
+        'change',
+        function() {
+
+            const count = this.files.length;
+
+            const display =
+                document.getElementById('pdf-file-names');
+
+            if (count === 0) {
+
+                display.textContent =
+                    'No PDF files selected';
+
+            } else {
+
+                display.textContent =
+                    count + ' PDF file(s) selected';
+
+            }
+
+        }
+    );
+
+
+    document.getElementById('word_file').addEventListener(
+        'change',
+        function() {
+
+            const display =
+                document.getElementById('word-file-name');
+
+            display.textContent =
+                this.files.length
+                ? this.files[0].name
+                : 'No Word document selected';
+
+        }
+    );
+
+
+    function toggleDateFilter() {
+
+        const selected = document.querySelector(
+            'input[name="date_mode"]:checked'
+        ).value;
+
+        const filter = document.getElementById(
+            'date-filter'
+        );
+
+        const startDate = document.getElementById(
+            'start_date'
+        );
+
+        const endDate = document.getElementById(
+            'end_date'
+        );
+
+        if (selected === 'filtered') {
+
+            filter.style.display = 'flex';
+
+            startDate.required = true;
+            endDate.required = true;
+
+        } else {
+
+            filter.style.display = 'none';
+
+            startDate.required = false;
+            endDate.required = false;
+
+        }
+
+    }
+
+</script>
+
+
+</body>
+
+</html>
+```
+
+# 6. `static/style.css`
+
+Replace existing style.css
+
+CSS
+
+```
+/* --------------------------------------------------
+   GLOBAL
+-------------------------------------------------- */
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+    color: #252525;
+    font-family: Arial, sans-serif;
+}
+
+.page-container {
+    width: 92%;
+    max-width: 1250px;
+    margin: auto;
+}
+
+
+/* --------------------------------------------------
+   HEADER
+-------------------------------------------------- */
+
+.header {
+    padding: 28px 0;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.header h1 {
+    margin: 0;
+    font-size: 28px;
+}
+
+.header p {
+    color: #777777;
+}
+
+
+/* --------------------------------------------------
+   UPLOAD SECTION
+-------------------------------------------------- */
+
+.upload-section {
+    margin-top: 30px;
+    padding: 25px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+}
+
+.upload-section h2 {
+    margin-top: 0;
+}
+
+.upload-section > p {
+    color: #666666;
+}
+
+.form-group {
+    margin-top: 28px;
+    margin-bottom: 25px;
+}
+
+.form-group > label {
+    display: block;
+    margin-bottom: 10px;
+    font-weight: 600;
+    font-size: 16px;
+}
+
+.field-description {
+    color: #777777;
+    font-size: 14px;
+}
+
+
+/* --------------------------------------------------
+   PROJECT NAME
+-------------------------------------------------- */
+
+.form-group input[type="text"] {
+    width: 100%;
+    max-width: 500px;
+    padding: 12px;
+    border: 1px solid #cccccc;
+    border-radius: 5px;
+    font-size: 15px;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: #2867b2;
+}
+
+
+/* --------------------------------------------------
+   UPLOAD BOX
+-------------------------------------------------- */
+
+.upload-box {
+    padding: 25px;
+    margin-top: 15px;
+    text-align: center;
+    border: 2px dashed #cccccc;
+    border-radius: 8px;
+    background: #fafafa;
+}
+
+.upload-box input[type="file"] {
+    display: block;
+    max-width: 100%;
+    margin: 0 auto 15px;
+}
+
+.file-label {
+    display: inline-block;
+    padding: 11px 22px;
+    background: #eeeeee;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.upload-box p {
+    margin-bottom: 0;
+    color: #777777;
+    overflow-wrap: anywhere;
+}
+
+
+/* --------------------------------------------------
+   DATE OPTIONS
+-------------------------------------------------- */
+
+.date-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 15px;
+    margin-top: 15px;
+}
+
+.date-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    flex: 1;
+    min-width: 220px;
+    padding: 18px;
+    border: 1px solid #dddddd;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.date-option input {
+    margin-top: 4px;
+}
+
+.date-option span {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.date-option small {
+    color: #777777;
+    line-height: 1.5;
+}
+
+
+/* --------------------------------------------------
+   DATE FILTER
+-------------------------------------------------- */
+
+.date-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin-top: 20px;
+}
+
+.date-field {
+    flex: 1;
+    min-width: 200px;
+}
+
+.date-field label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+}
+
+.date-field input {
+    width: 100%;
+    padding: 11px;
+    border: 1px solid #cccccc;
+    border-radius: 5px;
+}
+
+
+/* --------------------------------------------------
+   BUTTON
+-------------------------------------------------- */
+
+.upload-button {
+    width: 100%;
+    margin-top: 15px;
+    padding: 14px;
+    border: none;
+    border-radius: 5px;
+    background: #2867b2;
+    color: white;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+.upload-button:hover {
+    background: #174e91;
+}
+
+
+/* --------------------------------------------------
+   MESSAGES
+-------------------------------------------------- */
+
+.messages {
+    margin-top: 18px;
+    padding: 12px;
+    background: #f0f5fa;
+    border-radius: 5px;
+    overflow-wrap: anywhere;
+}
+
+
+/* --------------------------------------------------
+   DASHBOARD
+-------------------------------------------------- */
+
+.dashboard-section {
+    margin-top: 40px;
+}
+
+.project-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    margin-bottom: 35px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.project-title h2 {
+    margin-top: 0;
+    font-size: 25px;
+}
+
+.project-title p {
+    color: #777777;
+}
+
+.project-date {
+    text-align: right;
+    min-width: 200px;
+}
+
+.project-date span {
+    display: block;
+    margin-bottom: 7px;
+    color: #777777;
+    font-size: 13px;
+}
+
+.project-date strong {
+    font-size: 14px;
+}
+
+.date-mode-label {
+    margin-top: 10px;
+}
+
+
+/* --------------------------------------------------
+   CHART
+-------------------------------------------------- */
+
+.legend {
+    display: flex;
+    gap: 25px;
+    margin: 20px 0;
+}
+
+.legend span {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.legend-color {
+    width: 13px;
+    height: 13px;
+    display: inline-block;
+    border-radius: 3px;
+}
+
+.success-color {
+    background: #269B59;
+}
+
+.failure-color {
+    background: #D94B4B;
+}
+
+.chart-container {
+    position: relative;
+    width: 100%;
+    height: 430px;
+    padding: 20px;
+    border: 1px solid #eeeeee;
+    border-radius: 8px;
+}
+
+
+/* --------------------------------------------------
+   SUBSYSTEM DETAILS
+-------------------------------------------------- */
+
+.details-heading {
+    margin-top: 40px;
+}
+
+.subsystem-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+}
+
+.subsystem-card {
+    padding: 20px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.subsystem-card h3 {
+    margin-top: 0;
+    overflow-wrap: anywhere;
+}
+
+
+/* --------------------------------------------------
+   STATUS
+-------------------------------------------------- */
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 0;
+    border-bottom: 1px solid #eeeeee;
+}
+
+.success-text {
+    color: #269B59;
+}
+
+.failure-text {
+    color: #D94B4B;
+}
+
+.percentage-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 14px;
+    font-size: 13px;
+}
+
+
+/* --------------------------------------------------
+   PROCEDURES
+-------------------------------------------------- */
+
+details {
+    margin-top: 17px;
+}
+
+summary {
+    cursor: pointer;
+    color: #2867b2;
+    font-weight: 600;
+}
+
+details h4 {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    color: #444444;
+}
+
+details li {
+    margin-bottom: 6px;
+    overflow-wrap: anywhere;
+}
+
+
+/* --------------------------------------------------
+   UNASSIGNED
+-------------------------------------------------- */
+
+.unassigned-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+}
+
+.unassigned-card {
+    padding: 20px;
+    border: 1px solid #dce3ed;
+    border-radius: 8px;
+    background: #f5f7fa;
+}
+
+.unassigned-card h3 {
+    margin-top: 0;
+    color: #303d50;
+}
+
+
+/* --------------------------------------------------
+   FOOTER
+-------------------------------------------------- */
+
+footer {
+    margin-top: 50px;
+    padding: 20px 0;
+    border-top: 1px solid #eeeeee;
+    text-align: center;
+    color: #888888;
+}
+
+
+/* --------------------------------------------------
+   RESPONSIVE
+-------------------------------------------------- */
+
+@media (max-width: 700px) {
+
+    .subsystem-grid,
+    .unassigned-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .header h1 {
+        font-size: 23px;
+    }
+
+    .project-heading {
+        flex-direction: column;
+    }
+
+    .project-date {
+        text-align: left;
+    }
+
+    .chart-container {
+        height: 350px;
+    }
+
+    .date-options {
+        flex-direction: column;
+    }
+
+    .date-option {
+        min-width: 100%;
+    }
+
+}
+```
+
+# 7. `subsystems.json`
+
+Automatically generated
+
+You do not need to manually maintain this file anymore.
+
+The Word document parser generates it whenever the user submits a new document.
+
+For now, create the file with:
+
+JSON
+
+```
+{}
+```
+
+After uploading a Word document, it will automatically be replaced with something like:
+
+JSON
+
+```
+{
+    "Power Subsystem": [
+        "example.tst",
+        "power_check.tst",
+        "power_start.tst"
+    ],
+    "Thermal Subsystem": [
+        "thermal_check.tst",
+        "thermal_start.tst",
+        "cooling_test.tst"
+    ],
+    "Communication Subsystem": [
+        "communication_check.tst",
+        "signal_test.tst",
+        "receiver_test.tst"
+    ]
+}
+```
+
+This is only an illustrative example. The actual contents will come from the uploaded Word document.
+
+# 8. `requirements.txt`
+
+Create this additional file in your main project folder.
+
+```
+Flask==2.0.3
+Werkzeug==2.0.3
+python-docx==0.8.11
+PyMuPDF==1.18.19
+```
+
+Your existing `main.py` and `pdf_parser.py` require PyMuPDF, so make sure the installed version is compatible with your existing PDF extraction code.
+
+# 9. `static/chart.min.js`
+
+This is the Chart.js library used to display the subsystem graph.
+
+You do not need to write this file yourself.
+
+Download the Chart.js 3.9.1 minified file from:
+
+[Download Chart.js 3.9.1](https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js?utm_source=chatgpt.com)
+
+Save the downloaded file as:
+
+```
+visualisation/static/chart.min.js
+```
+
+Keep this file locally so the dashboard can use it without depending on an internet connection.
+
+# 10. Existing files – leave unchanged
+
+Keep your existing:
+
+`main.py`
+
+The PDF processing and JSON generation code you supplied.
+
+`pdf_parser.py`
+
+The PDF text extraction, procedure parsing, STEP status extraction and execution generation code you supplied.
+
+Do not replace either file with a new version.
+
+# 11. Final folder structure
+
+Once everything is created, your complete project should look like this:
+
+```
+visualisation/
+│
+├── app.py
+├── main.py
+├── pdf_parser.py
+├── dashboard.py
+├── python_docx_parser.py
+├── subsystems.json
+├── requirements.txt
+│
+├── input/
+│   └── (uploaded PDF files)
+│
+├── output/
+│   └── (generated JSON file)
+│
+├── uploaded_word/
+│   └── (uploaded Word document)
+│
+├── static/
+│   ├── chart.min.js
+│   └── style.css
+│
+└── templates/
+    └── index.html
+```
+
+The `input`, `output` and `uploaded_word` folders will be created automatically if they don't exist.
+
+# 12. How to run the project
+
+Once you have copied all the files:
+
+Step 1. Open Command Prompt in the `visualisation` folder.
+
+Step 2. Install the requirements:
+
+Bash
+
+```
+python -m pip install -r requirements.txt
+```
+
+If your existing PyMuPDF installation is already working, retain that compatible installation rather than unnecessarily changing it.
+
+Step 3. Run the application:
+
+Bash
+
+```
+python app.py
+```
+
+Step 4. Open your browser:
+
+```
+http://127.0.0.1:5000
+```
+
+Step 5. Enter the project name, upload PDFs, upload the Word document, choose the date option and click Generate Dashboard.
+
+# 13. Important behaviour of the final application
+
+| Requirement                             | Implementation |
+| --------------------------------------- | -------------- |
+| Multiple PDF uploads                    | Yes            |
+| Word document upload                    | Yes            |
+| Automatic JSON generation               | Yes            |
+| Automatic subsystem JSON generation     | Yes            |
+| Filename matching without extensions    | Yes            |
+| 90% similarity matching                 | Yes            |
+| Duplicate filenames within a subsystem  | Removed        |
+| Same filename in different subsystems   | Allowed        |
+| Ambiguous matching                      | Handled        |
+| Overall date option                     | Yes            |
+| Start and end date filtering            | Yes            |
+| Latest execution within selected period | Yes            |
+| Success and Failure dashboard           | Yes            |
+| Unassigned procedures                   | Yes            |
+| Replace previous submission             | Yes            |
+| Project name displayed                  | Yes            |
+
+A few limitations to be aware of before relying on it:
+
+* The Word parser expects subsystem headings to appear as paragraphs immediately before their corresponding tables, with filenames in the third column. Your actual Word document must follow that arrangement.
+
+* The existing PDF parser treats an execution with no detected failed STEP as Success. I have preserved that behaviour rather than changing your existing parser.
+
+* The code has been prepared for your stated Python 3.6.5 environment, but I cannot honestly guarantee zero errors without running it against your actual Word document and PDF reports.
+
+## Final confirmation
+
+You now have the code for all the new application files, while retaining your original `main.py` and `pdf_parser.py`.
+
+The next thing to do is create the folder, copy the files, install the dependencies and test the complete workflow on your college system.
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+and will everything work 
+
+
+Yes! Based on the workflow we planned, the application is designed to produce the complete Satellite Testing Dashboard. However, I want to distinguish between the intended functionality and a fully tested application. Since we haven't run all the files together using your actual PDFs and Word document, I cannot guarantee that everything will work without errors yet.
+
+Let me explain what you will finally get.
+
+## 1. What will happen when someone uses the application?
+
+The user will open the application in their browser.
+
+Satellite Testing Dashboard
+
+PROJECT DETAILS
+
+Project Name
+
+Enter project name
+
+1. Upload PDF Reports
+
+Select multiple PDF files
+
+2. Upload Subsystem Word Document
+
+Select Word document (.docx)
+
+3. Select Date Option
+
+* Overall
+
+* Filter by date (start date and end date)
+
+Generate Dashboard
+
+Illustrative preview of the planned upload screen, not a screenshot of a running application.
+
+The processing will happen in this order:
+
+1. PDFs go to your existing `main.py` and `pdf_parser.py`.
+
+2. The generated JSON is saved in `output/`.
+
+3. The Word document goes to `python_docx_parser.py`.
+
+4. The subsystem information is extracted and saved into `subsystems.json`.
+
+5. `dashboard.py` compares the procedure filenames from both sources.
+
+6. The selected date range is applied.
+
+7. The dashboard is displayed.
+
+## 2. What will you finally get as output?
+
+You will get a dashboard containing:
+
+# Satellite Testing Dashboard
+
+## PROJECT ABC – Project Overview
+
+Date: 01-01-2025 to 31-12-2025
+
+Subsystem Testing Overview
+
+Chart options
+
+Illustrative sample data only.
+
+
+
+Success: 26
+
+Failure: 8
+
+Subsystem Details
+
+Power Subsystem
+
+Success
+
+8
+
+Failure
+
+2
+
+Unmatched 0
+
+Ambiguous 0
+
+View procedure names
+
+Thermal Subsystem
+
+Success
+
+6
+
+Failure
+
+1
+
+Unmatched 0
+
+Ambiguous 0
+
+View procedure names
+
+Other Procedures
+
+Unassigned Success
+
+3
+
+Unassigned Failure
+
+1
+
+Illustrative dashboard layout and invented sample counts, not actual test results.
+
+You will also get the generated JSON file, for example:
+
+```
+output/
+    output_2026-11-11_10-30-00.json
+```
+
+And the generated subsystem configuration:
+
+```
+subsystems.json
+```
+
+The JSON will contain execution dates, durations, STEP statuses, final statuses, failure reasons and mode executions, according to your existing parser.
+
+## 3. What is Werkzeug?
+
+`Werkzeug==2.0.3` is a Python library used by Flask.
+
+In simple terms:
+
+* Flask uses Werkzeug to handle web requests and responses.
+
+* It helps process uploaded files.
+
+* It handles parts of the local web server functionality.
+
+* It works alongside Flask to run your application.
+
+It is not a separate application that you need to open.
+
+## 4. Is Werkzeug already installed on your system?
+
+I cannot see your college computer's installed Python packages, so we need to check.
+
+Open Command Prompt and enter:
+
+Bash
+
+```
+python -m pip show Werkzeug
+```
+
+If installed, you will see something similar to:
+
+```
+Name: Werkzeug
+Version: 2.0.3
+Location: ...
+```
+
+If it says:
+
+```
+WARNING: Package(s) not found: Werkzeug
+```
+
+It is not installed in that Python environment.
+
+You can install the required version using:
+
+Bash
+
+```
+python -m pip install Werkzeug==2.0.3
+```
+
+Or install all project dependencies together:
+
+Bash
+
+```
+python -m pip install -r requirements.txt
+```
+
+Important: `Werkzeug==2.0.3` is a version requirement, not a guarantee that this exact version is already installed.
+
+## 5. My recommendation before your final college demonstration
+
+Check these five things:
+
+1. PDF upload and JSON generation.
+
+2. Word document upload and automatic `subsystems.json` generation.
+
+3. Correct matching of procedure filenames.
+
+4. Overall and date-filtered dashboard results.
+
+5. Uploading a second project and confirming that the previous project's input and output are replaced.
+
+Once these five tests pass, you can consider the application ready for your demonstration.
+
+One important point: Your original `main.py` and `pdf_parser.py` will remain unchanged, as requested.
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+No, you don't need to create a separate Werkzeug file. It is simply a Python dependency used by Flask.
+
+I added it to requirements.txt to specify a compatible version of Werkzeug.
+
+Why wasn't it in your original files?
+
+Because your original app.py already imports Flask, and Flask uses Werkzeug internally. You don't normally need to install Werkzeug separately.
+
+My recommendation: You can remove this line:
+
+Werkzeug==2.0.3
+
+Keep your requirements.txt as:
+
+Flask==2.0.3
+python-docx==0.8.11
+PyMuPDF==1.18.19
+
+Flask will install its compatible Werkzeug dependency automatically.
+
+That's all. You don't need to make any other changes for this.
+
+and do i need to install this now - Werkzeug==2.0.3  
+
+No. You do not need to install Werkzeug==2.0.3 separately.
+
+Just install your project requirements:
+
+python -m pip install -r requirements.txt
+
+Flask will automatically install its required Werkzeug dependency.
+
+You can leave Werkzeug out of your requirements.txt.
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+Yes, you can skip `requirements.txt` if you prefer to install the libraries individually.
+
+However, I want to be clear: the project is designed, but I cannot confirm that every component is working perfectly until the complete application is tested with your actual PDF and Word files.
+
+Here is the final project arrangement and how everything should work.
+
+# 1. Final file structure
+
+Your project folder should look exactly like this:
+
+```
+visualisation/
+│
+├── app.py
+├── main.py
+├── pdf_parser.py
+├── dashboard.py
+├── python_docx_parser.py
+├── subsystems.json
+│
+├── input/
+│   └── (uploaded PDF files)
+│
+├── output/
+│   └── (generated JSON file)
+│
+├── uploaded_word/
+│   └── (uploaded Word document)
+│
+├── static/
+│   ├── chart.min.js
+│   └── style.css
+│
+└── templates/
+    └── index.html
+```
+
+You do not need `requirements.txt` if you are installing the dependencies manually.
+
+# 2. Purpose of every file
+
+| File                    | Purpose                                                      |
+| ----------------------- | ------------------------------------------------------------ |
+| `app.py`                | Main Flask application and upload handling                   |
+| `main.py`               | Processes uploaded PDFs and generates JSON                   |
+| `pdf_parser.py`         | Extracts procedures, STEP statuses and execution information |
+| `python_docx_parser.py` | Reads the uploaded Word document                             |
+| `dashboard.py`          | Matches procedures and calculates dashboard results          |
+| `subsystems.json`       | Automatically generated subsystem configuration              |
+| `index.html`            | Dashboard interface                                          |
+| `style.css`             | Dashboard styling                                            |
+| `chart.min.js`          | Generates the bar chart                                      |
+
+# 3. How the complete application works
+
+USER OPENS DASHBOARD
+
+Enters project name
+
+UPLOAD PDF REPORTS
+
+main.py → pdf_parser.py
+
+JSON generated
+
+UPLOAD WORD DOCUMENT
+
+python_docx_parser.py
+
+subsystems.json generated
+
+SELECT DATE OPTION
+
+Overall or Start Date – End Date
+
+DASHBOARD PROCESSING
+
+dashboard.py compares the generated JSON with subsystem configuration
+
+FINAL DASHBOARD
+
+Subsystem-wise Success and Failure results
+
+# 4. What the dashboard will display
+
+Your final dashboard will contain:
+
+1. Project name.
+
+2. Overall execution date range or selected date range.
+
+3. Subsystem-wise Success and Failure bar chart.
+
+4. Individual subsystem cards.
+
+5. Success count.
+
+6. Failure count.
+
+7. Unmatched procedure count.
+
+8. Ambiguous procedure count.
+
+9. Procedure names under each category.
+
+10. Separate Unassigned Procedures section.
+
+# 5. Important functionality
+
+These are the rules we agreed on:
+
+| Functionality                         | Expected behaviour                    |
+| ------------------------------------- | ------------------------------------- |
+| PDF upload                            | Multiple PDFs allowed                 |
+| Word upload                           | One Word document                     |
+| New PDF upload                        | Replaces previous PDF inputs          |
+| New Word upload                       | Replaces previous Word input          |
+| New JSON                              | Replaces previous generated JSON      |
+| Filename comparison                   | Without extensions                    |
+| Similarity matching                   | 90% threshold                         |
+| Duplicate filename in same subsystem  | One occurrence                        |
+| Same filename in different subsystems | Allowed in both                       |
+| Ambiguous matches                     | Separately identified                 |
+| Overall date                          | Uses all available executions         |
+| Date filtering                        | Uses executions within selected dates |
+| Multiple executions                   | Latest execution in selected period   |
+| Dashboard status                      | Success and Failure only              |
+
+One important implementation detail: the date filter must be applied before selecting the latest execution. This ensures that the latest execution inside the selected date range is used, rather than simply taking the latest execution overall.
+
+# 6. Libraries to install
+
+Since you are skipping `requirements.txt`, install the required libraries individually:
+
+Bash
+
+```
+python -m pip install Flask==2.0.3
+```
+
+Bash
+
+```
+python -m pip install python-docx==0.8.11
+```
+
+Your existing PyMuPDF installation should be retained if it is already working with your original PDF parser.
+
+Werkzeug is installed as a Flask dependency; no separate installation is normally necessary.
+
+# 7. How to start the application
+
+Open Command Prompt inside your `visualisation` folder.
+
+Run:
+
+Bash
+
+```
+python app.py
+```
+
+Then open:
+
+Local application
+
+`http://127.0.0.1:5000`
+
+# 8. What you should verify before the college demonstration
+
+* Application opens without errors.
+
+* Project name can be entered.
+
+* Multiple PDFs can be uploaded.
+
+* JSON is generated correctly.
+
+* Word document uploads successfully.
+
+* `subsystems.json` is generated correctly.
+
+* Procedure matching works correctly.
+
+* Overall date option works.
+
+* Start and end date filtering works.
+
+* Latest execution is selected within the chosen date range.
+
+* Dashboard displays correct counts and procedure names.
+
+* A second upload replaces the previous project data.
+
+My final advice: Keep your original `main.py` and `pdf_parser.py` unchanged, as requested. The main files that need to work together correctly are `app.py`, `python_docx_parser.py` and `dashboard.py`.
+
+I would not call the project completely finished until the first end-to-end test succeeds. That is the only way to confirm that the Word table structure, PDF-generated JSON and dashboard matching all work together correctly.
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Okay! First, create your main project folder and all the files and folders inside it as shown below.
+
+# Step 1. Create the main project folder
+
+Create a folder named:
+
+```
+visualisation
+```
+
+# Step 2. Create the following files and folders
+
+visualisation/
+
+app.py
+
+main.py
+
+pdf_parser.py
+
+dashboard.py
+
+python_docx_parser.py
+
+subsystems.json
+
+input/
+
+Folder
+
+output/
+
+Folder
+
+uploaded_word/
+
+Folder
+
+static/
+
+`style.css`
+
+`chart.min.js`
+
+templates/
+
+`index.html`
+
+# Step 3. What goes inside each file?
+
+| File                    | What to put inside                      |
+| ----------------------- | --------------------------------------- |
+| `app.py`                | Flask application code                  |
+| `main.py`               | Your original PDF-to-JSON code          |
+| `pdf_parser.py`         | Your original PDF parser code           |
+| `dashboard.py`          | Dashboard processing and matching code  |
+| `python_docx_parser.py` | Word document parsing code              |
+| `subsystems.json`       | Initially `{}`; generated automatically |
+| `style.css`             | Dashboard CSS code                      |
+| `chart.min.js`          | Downloaded Chart.js library             |
+| `index.html`            | Dashboard HTML template                 |
+
+# Step 4. What goes into the folders?
+
+* input/ – Uploaded PDF reports.
+
+* output/ – Generated JSON output.
+
+* uploaded_word/ – Uploaded Word document.
+
+Initially, all three folders should be empty.
+
+# Step 5. Download Chart.js
+
+Download the library here:
+
+[Download Chart.js 3.9.1](https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js?utm_source=chatgpt.com)
+
+Save it inside `static/` as `chart.min.js`.
+
+# Step 6. Initial checklist
+
+Folder setup progress
+
+0/11 completed
+
+Create visualisation folder
+
+Create all six Python/JSON files
+
+Create input folder
+
+Create output folder
+
+Create uploaded_word folder
+
+Create static folder
+
+Create templates folder
+
+Put original main.py inside
+
+Put original pdf_parser.py inside
+
+Download chart.min.js
+
+Create style.css and index.html
+
+Important: Don't start running the application yet. First create this complete folder structure and put the correct code inside each file. Then we can proceed to installation and testing.
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+
