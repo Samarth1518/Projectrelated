@@ -826,3 +826,104 @@ We'll start with `subsystem_parser.py` and complete it first. Then we'll integra
 
 //////////////////////////////////////////////////////////////////////////
 
+I've gone through all three files carefully:
+
+1. `subsystem_parser.py` – Extracts subsystem names and procedure filenames from the DOCX document and generates `subsystems.json`.
+
+2. `dashboard.py` – Reads `subsystems.json`, compares configured procedure names against the generated execution JSON, identifies Success, Failure, Unmatched, Ambiguous, and Unassigned procedures, and calculates percentages and date ranges.
+
+3. `templates/index.html` – Provides the PDF upload interface, subsystem dashboard, procedure details, and Chart.js visualization.
+
+I understand how these three components are intended to work together.
+
+A few important things I'll keep in mind while we finish:
+
+* Python 3.6.5 compatibility must be maintained.
+
+* The subsystem parser must handle filenames split across multiple lines in DOCX tables.
+
+* Filename matching must avoid incorrect assignments.
+
+* Ambiguous matches must not be incorrectly classified as unassigned.
+
+* The dashboard must use the latest execution based on `date_time`.
+
+* The existing dashboard design and functionality should be preserved.
+
+* The generated `subsystems.json` must be available to `dashboard.py`.
+
+I won't change anything in these files yet.
+
+Let's proceed with the next file or requirement. I'll consider these three files our current implementation baseline and make sure subsequent changes remain compatible with them.
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Great. Now we'll move step by step and get the complete Satellite Testing Dashboard working.
+
+### Step 1 – Verify your project folder structure
+
+Before moving forward, I want to confirm that all files are placed correctly.
+
+Your project should look like this:
+
+```
+Satellite_Testing_Dashboard/
+│
+├── app.py
+├── dashboard.py
+├── subsystem_parser.py
+├── subsystems.json
+│
+├── templates/
+│   └── index.html
+│
+├── static/
+│   ├── style.css
+│   └── chart.min.js
+│
+├── uploads/
+│
+└── output/
+```
+
+Some folders and files may be created automatically by your application.
+
+### Step 2 – Next, I need your `app.py`
+
+This is the most important file to check next because it connects all our components.
+
+I need to verify that it correctly:
+
+1. Starts the Flask application.
+
+2. Accepts multiple PDF uploads.
+
+3. Accepts the project name.
+
+4. Processes the uploaded PDF files.
+
+5. Generates the execution JSON.
+
+6. Calls `subsystem_parser.py` when the DOCX configuration needs processing.
+
+7. Calls `dashboard.py` to prepare dashboard data.
+
+8. Passes the results to `templates/index.html`.
+
+9. Handles errors and displays appropriate messages.
+
+### What I need from you now
+
+Send me your complete current `app.py` file.
+
+Please don't modify anything yet.
+
+I'll review it against the three files you've already shared, identify missing connections or problems, and then give you the corrected implementation if necessary.
+
+We'll finish one component at a time rather than changing multiple files and introducing new errors.
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
