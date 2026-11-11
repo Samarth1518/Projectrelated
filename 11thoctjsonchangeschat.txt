@@ -1,0 +1,1496 @@
+Perfect. We'll use Option B, and include every failure reason with its corresponding STEP ID.
+
+If one execution has multiple failed steps, all of them will appear in the same CSV cell.
+
+1. Example of the expected output
+
+Suppose your JSON contains:
+
+"final_status": "Failure",
+"final_status_reason": [
+    {
+        "01.002": "Power supply voltage out of range"
+    },
+    {
+        "01.005": "Communication timeout"
+    },
+    {
+        "02.001": "Unexpected subsystem response"
+    }
+]
+
+The CSV will display:
+
+Date
+
+	
+
+Final Status
+
+	
+
+Failure Reason
+
+
+
+
+01-Oct-2024
+
+	
+
+Failure
+
+	
+
+01.002: Power supply voltage out of range
+
+
+		
+
+01.005: Communication timeout
+
+
+		
+
+02.001: Unexpected subsystem response
+
+These three reasons will be inside the same cell for that execution, separated by line breaks.
+
+2. Final CSV columns
+
+Si No
+
+Procedure Name
+
+Date of Execution
+
+Duration
+
+Mode
+
+Final Status
+
+Failure Reason
+
+3. How we'll handle the data
+
+Extract the date from date_time and display it as 01-Oct-2024.
+
+Retain the existing duration and mode logic.
+
+Retain the final Success/Failure status.
+
+Read every entry in final_status_reason.
+
+Include every failed STEP ID and its corresponding explanation.
+
+Leave the failure reason blank for successful executions.
+
+Keep the existing procedure grouping and chronological ordering.
+
+One important detail: We will not limit the failure reasons to one STEP ID. If an execution has 2, 5, or 20 failure reasons in the JSON, all will be included.
+
+4. Next step
+
+I'll now prepare the complete replacement json_to_csv.py code, compatible with Python 3.6.5.
+
+Keep main.py and pdf_parser.py exactly as they are.
+
+okay give me this now 
+
+Great. Replace your existing json_to_csv.py completely with the code below.
+
+This version keeps your existing JSON structure and adds the separate date and complete failure reasons with STEP IDs.
+
+1. Complete revised json_to_csv.py
+
+
+code
+
+
+
+
+# json_to_csv.py
+# Convert generated PDF-to-JSON output into a grouped CSV file.
+# Compatible with Python 3.6.5.
+
+import os
+import glob
+import json
+import csv
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+
+def get_latest_json():
+    """Find the latest generated JSON file."""
+
+    pattern = os.path.join(OUTPUT_DIR, "output_*.json")
+    json_files = glob.glob(pattern)
+
+    if not json_files:
+        raise FileNotFoundError(
+            "No generated JSON files found in output folder."
+        )
+
+    return max(json_files, key=os.path.getmtime)
+
+
+def get_mode(execution):
+    """Determine Auto, Manual or Both from recorded STEP IDs."""
+
+    mode_data = execution.get("mode_executions", {})
+
+    auto_data = mode_data.get("auto", {})
+    manual_data = mode_data.get("manual", {})
+
+    status_names = [
+        "success",
+        "failure",
+        "progress",
+        "suspend"
+    ]
+
+    auto_has_steps = False
+    manual_has_steps = False
+
+    for status in status_names:
+
+        if auto_data.get(status, []):
+            auto_has_steps = True
+
+        if manual_data.get(status, []):
+            manual_has_steps = True
+
+    if auto_has_steps and manual_has_steps:
+        return "Both (Auto + Manual)"
+
+    elif auto_has_steps:
+        return "Auto"
+
+    elif manual_has_steps:
+        return "Manual"
+
+    else:
+        return "Unknown"
+
+
+def format_execution_date(execution):
+    """
+    Extract only the date from the JSON timestamp.
+
+    Input:
+    2024-10-01 09:39:36.822
+
+    Output:
+    01-Oct-2024
+    """
+
+    date_value = execution.get("date_time", "")
+
+    if not date_value:
+        return ""
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S:%f",
+        "%d-%b-%Y %H:%M:%S"
+    ]
+
+    for date_format in formats:
+        try:
+            parsed_date = datetime.strptime(
+                date_value.strip(),
+                date_format
+            )
+
+            return parsed_date.strftime("%d-%b-%Y")
+
+        except ValueError:
+            continue
+
+    # Do not silently display an incorrect date.
+    return "INVALID DATE: " + str(date_value)
+
+
+def get_datetime_sort_key(execution):
+    """Sort executions chronologically."""
+
+    date_value = execution.get("date_time", "")
+
+    if not date_value:
+        return (1, datetime.max)
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%b-%Y %H:%M:%S:%f",
+        "%d-%b-%Y %H:%M:%S"
+    ]
+
+    for date_format in formats:
+        try:
+            parsed_date = datetime.strptime(
+                date_value.strip(),
+                date_format
+            )
+
+            return (0, parsed_date)
+
+        except ValueError:
+            continue
+
+    return (1, datetime.max)
+
+
+def get_failure_reasons(execution):
+    """
+    Extract ALL failure reasons with their corresponding STEP IDs.
+
+    Multiple failure reasons are placed in one CSV cell,
+    separated by line breaks.
+    """
+
+    final_status = execution.get("final_status", "")
+
+    if str(final_status).strip().lower() != "failure":
+        return ""
+
+    reasons = execution.get("final_status_reason", [])
+
+    if not isinstance(reasons, list):
+        return ""
+
+    formatted_reasons = []
+
+    for reason_entry in reasons:
+
+        if not isinstance(reason_entry, dict):
+            continue
+
+        for step_id, description in reason_entry.items():
+
+            description = str(description).strip()
+
+            if description:
+                formatted_reasons.append(
+                    str(step_id) + ": " + description
+                )
+            else:
+                formatted_reasons.append(str(step_id))
+
+    return "\n".join(formatted_reasons)
+
+
+def convert_json_to_csv():
+
+    print("=" * 60)
+    print("JSON TO CSV CONVERTER")
+    print("=" * 60)
+
+    if not os.path.isdir(OUTPUT_DIR):
+        raise RuntimeError("Output folder does not exist.")
+
+    # Find latest JSON file.
+    json_path = get_latest_json()
+
+    print("\nReading JSON:", os.path.basename(json_path))
+
+    with open(json_path, "r", encoding="utf-8") as json_file:
+        data = json.load(json_file)
+
+    # Generate CSV with the same filename timestamp.
+    csv_name = os.path.splitext(
+        os.path.basename(json_path)
+    )[0] + ".csv"
+
+    csv_path = os.path.join(OUTPUT_DIR, csv_name)
+
+    serial_number = 1
+    total_procedures = 0
+    total_executions = 0
+    total_failures = 0
+    total_failure_reasons = 0
+
+    headers = [
+        "Si No",
+        "Procedure Name",
+        "Date of Execution",
+        "Duration",
+        "Mode",
+        "Final Status",
+        "Failure Reason"
+    ]
+
+    with open(
+        csv_path,
+        "w",
+        newline="",
+        encoding="utf-8-sig"
+    ) as csv_file:
+
+        writer = csv.writer(csv_file)
+
+        writer.writerow(headers)
+
+        # Process each procedure.
+        for procedure_name, procedure_data in data.items():
+
+            if procedure_name == "Insights":
+                continue
+
+            if not isinstance(procedure_data, dict):
+                continue
+
+            executions = procedure_data.get(
+                "procedures", []
+            )
+
+            if not isinstance(executions, list):
+                continue
+
+            if not executions:
+                continue
+
+            # Oldest execution first.
+            executions = sorted(
+                executions,
+                key=get_datetime_sort_key
+            )
+
+            first_execution = True
+
+            for execution in executions:
+
+                if not isinstance(execution, dict):
+                    continue
+
+                date_time = format_execution_date(execution)
+
+                duration = execution.get("Dur", "")
+
+                mode = get_mode(execution)
+
+                final_status = execution.get(
+                    "final_status", ""
+                )
+
+                failure_reason = get_failure_reasons(execution)
+
+                if str(final_status).strip().lower() == "failure":
+                    total_failures += 1
+                    if failure_reason:
+                        total_failure_reasons += len(
+                            failure_reason.split("\n")
+                        )
+
+                if first_execution:
+
+                    writer.writerow([
+                        serial_number,
+                        procedure_name,
+                        date_time,
+                        duration,
+                        mode,
+                        final_status,
+                        failure_reason
+                    ])
+
+                    first_execution = False
+                    serial_number += 1
+                    total_procedures += 1
+
+                else:
+
+                    writer.writerow([
+                        "",
+                        "",
+                        date_time,
+                        duration,
+                        mode,
+                        final_status,
+                        failure_reason
+                    ])
+
+                total_executions += 1
+
+    print("\nConversion completed successfully!")
+
+    print("JSON file:", os.path.basename(json_path))
+    print("CSV file:", os.path.basename(csv_path))
+
+    print("Total procedures:", total_procedures)
+    print("Total executions:", total_executions)
+    print("Failed executions:", total_failures)
+    print("Failure reasons extracted:", total_failure_reasons)
+
+    print("\nCSV saved at:")
+    print(csv_path)
+
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+
+    try:
+        convert_json_to_csv()
+
+    except Exception as error:
+        print("\nERROR:", str(error))
+        
+        
+        
+        
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+2. Your project structure
+
+No other files need to be added.
+
+visualisation/
+│
+├── main.py
+├── pdf_parser.py
+├── json_to_csv.py
+│
+├── input/
+│   └── your_pdf_files.pdf
+│
+└── output/
+    ├── output_2026-11-11_10-30-00.json
+    └── output_2026-11-11_10-30-00.csv
+3. How to execute
+
+Replace the old code in json_to_csv.py.
+
+Save the file.
+
+Run main.py first if you want to generate fresh JSON from your PDFs.
+
+Open PyCharm Terminal.
+
+Execute:
+
+python json_to_csv.py
+
+6. Open the generated CSV in Excel.
+
+4. Important testing points
+Date appears as 01-Oct-2024, without time.
+All procedure names appear only once.
+Each execution has its own row.
+Mode is correctly displayed.
+Success and Failure statuses are retained.
+Every failed STEP ID is displayed.
+Multiple failure explanations appear in the same cell on separate lines.
+Successful executions have an empty Failure Reason cell.
+
+One note: The code expects the JSON timestamp to contain the date. If it reports INVALID DATE, send me the corresponding date_time value from your JSON so we can support its exact format.
+
+After running it, send me the CSV output or a screenshot. We'll verify the date and failure-reason extraction before making any further changes.
+
+and now how will i get csv will everything be correct ?
+
+Yes! Once you replace the old json_to_csv.py with the revised code, you can generate your CSV using the following steps.
+
+I recommend testing it once before relying on the results.
+
+Step 1: Save the revised code
+
+Open json_to_csv.py in PyCharm.
+
+Replace the old code with the new code.
+
+Press Ctrl + S.
+
+Do not modify main.py or pdf_parser.py.
+
+Step 2: Generate the JSON
+
+First, run main.py.
+
+PyCharm → Open main.py → Right-click → Run 'main'
+
+Wait until you see:
+
+Conversion finished.
+Output file: ...output_....json
+Step 3: Generate the CSV
+
+Now open json_to_csv.py.
+
+Right-click and select Run 'json_to_csv'.
+
+Alternatively, in the PyCharm Terminal, enter:
+
+python json_to_csv.py
+
+You should see:
+
+JSON TO CSV CONVERTER
+
+Conversion completed successfully!
+
+Total procedures: ...
+Total executions: ...
+Failed executions: ...
+Failure reasons extracted: ...
+
+CSV saved at:
+...
+Step 4: Find your CSV
+
+Open your project's output folder.
+
+output/
+
+output_2026-11-11_10-30-00.json
+
+output_2026-11-11_10-30-00.csv
+
+New
+The filenames will use your actual execution timestamp.
+
+Open the CSV using Excel.
+
+Step 5: Check whether everything is correct
+
+Item
+
+	
+
+Expected result
+
+
+
+
+Date
+
+	
+
+01-Oct-2024
+
+
+
+
+Duration
+
+	
+
+Original duration
+
+
+
+
+Mode
+
+	
+
+Auto / Manual / Both
+
+
+
+
+Final Status
+
+	
+
+Success / Failure
+
+
+
+
+Failure Reason
+
+	
+
+Every failed STEP ID and explanation
+
+
+
+
+Procedure grouping
+
+	
+
+Name appears only once
+
+
+
+
+Execution order
+
+	
+
+Oldest to latest
+
+One important caution: The code is designed for your JSON structure, but we cannot guarantee perfect extraction until we compare its output against an actual JSON and PDF. Also, if the JSON contains a timestamp format not supported by the date parser, it will show INVALID DATE rather than silently giving you a wrong date.
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Yes, understood. We'll make these final changes in `json_to_csv.py` only. Your existing `main.py` and `pdf_parser.py` will remain completely unchanged.
+
+### Final CSV column structure
+
+| Si No | Procedure Name | Date_Time               | Duration(Seconds) | Mode   | Final Status | Failure Reasons                           |
+| ----- | -------------- | ----------------------- | ----------------- | ------ | ------------ | ----------------------------------------- |
+| 1     | example.tst    | 2024-10-01 09:39:36.822 | 203               | Auto   | Failure      | 01.002: Voltage check failed              |
+|       |                | 2024-10-02 10:20:15.123 | 150               | Manual | Success      |                                           |
+|       |                | 2024-10-03 11:30:20.456 | 180               | Both   | Failure      | 01.003: Incorrect output; 01.005: Timeout |
+
+### Changes we'll implement
+
+1. Date_Time: Fetch the complete date and time directly from JSON without removing or modifying anything.
+
+2. Duration(Seconds): Change the column heading.
+
+3. Failure Reasons: Fetch all failure reasons from `final_status_reason`.
+
+4. STEP IDs: Display every failure reason alongside its corresponding STEP ID.
+
+5. Multiple failures: If one execution has five failure reasons, all five will appear in the same CSV cell.
+
+6. Successful executions: Leave the Failure Reasons column empty.
+
+7. Keep the existing grouped procedure format and chronological ordering.
+
+### Complete revised `json_to_csv.py`
+
+Replace your existing file with this:
+
+Python
+
+```
+# json_to_csv.py
+# Convert generated PDF-to-JSON output into a grouped CSV file.
+# Compatible with Python 3.6.5.
+
+import os
+import glob
+import json
+import csv
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+
+def get_latest_json():
+    """Find the latest generated JSON file."""
+
+    pattern = os.path.join(OUTPUT_DIR, "output_*.json")
+    json_files = glob.glob(pattern)
+
+    if not json_files:
+        raise FileNotFoundError(
+            "No generated JSON files found in output folder."
+        )
+
+    return max(json_files, key=os.path.getmtime)
+
+
+def get_mode(execution):
+    """Determine Auto, Manual or Both mode."""
+
+    mode_data = execution.get("mode_executions", {})
+
+    auto_data = mode_data.get("auto", {})
+    manual_data = mode_data.get("manual", {})
+
+    status_names = [
+        "success",
+        "failure",
+        "progress",
+        "suspend"
+    ]
+
+    auto_has_steps = False
+    manual_has_steps = False
+
+    for status in status_names:
+
+        if auto_data.get(status, []):
+            auto_has_steps = True
+
+        if manual_data.get(status, []):
+            manual_has_steps = True
+
+    if auto_has_steps and manual_has_steps:
+        return "Both (Auto + Manual)"
+
+    elif auto_has_steps:
+        return "Auto"
+
+    elif manual_has_steps:
+        return "Manual"
+
+    else:
+        return "Unknown"
+
+
+def get_datetime_sort_key(execution):
+    """Sort executions using their complete date and time."""
+
+    date_value = execution.get("date_time", "")
+
+    if not date_value:
+        return (1, datetime.max)
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S"
+    ]
+
+    for date_format in formats:
+        try:
+            parsed_date = datetime.strptime(
+                date_value,
+                date_format
+            )
+
+            return (0, parsed_date)
+
+        except ValueError:
+            continue
+
+    return (1, datetime.max)
+
+
+def get_failure_reasons(execution):
+    """
+    Extract every failure reason along with its STEP ID.
+    """
+
+    reasons = execution.get("final_status_reason", [])
+
+    if not isinstance(reasons, list):
+        return ""
+
+    formatted_reasons = []
+
+    for reason_item in reasons:
+
+        if not isinstance(reason_item, dict):
+            continue
+
+        for step_id, description in reason_item.items():
+
+            if description:
+                formatted_reasons.append(
+                    str(step_id) + ": " + str(description)
+                )
+
+    return "; ".join(formatted_reasons)
+
+
+def convert_json_to_csv():
+
+    print("=" * 60)
+    print("JSON TO CSV CONVERTER")
+    print("=" * 60)
+
+    if not os.path.isdir(OUTPUT_DIR):
+        raise RuntimeError("Output folder does not exist.")
+
+    json_path = get_latest_json()
+
+    print("\nReading JSON:", os.path.basename(json_path))
+
+    with open(json_path, "r", encoding="utf-8") as json_file:
+        data = json.load(json_file)
+
+    csv_name = os.path.splitext(
+        os.path.basename(json_path)
+    )[0] + ".csv"
+
+    csv_path = os.path.join(OUTPUT_DIR, csv_name)
+
+    serial_number = 1
+    total_procedures = 0
+    total_executions = 0
+
+    headers = [
+        "Si No",
+        "Procedure Name",
+        "Date_Time",
+        "Duration(Seconds)",
+        "Mode",
+        "Final Status",
+        "Failure Reasons"
+    ]
+
+    with open(
+        csv_path,
+        "w",
+        newline="",
+        encoding="utf-8-sig"
+    ) as csv_file:
+
+        writer = csv.writer(csv_file)
+
+        writer.writerow(headers)
+
+        for procedure_name, procedure_data in data.items():
+
+            if procedure_name == "Insights":
+                continue
+
+            if not isinstance(procedure_data, dict):
+                continue
+
+            executions = procedure_data.get(
+                "procedures", []
+            )
+
+            if not isinstance(executions, list):
+                continue
+
+            if not executions:
+                continue
+
+            executions = sorted(
+                executions,
+                key=get_datetime_sort_key
+            )
+
+            first_execution = True
+
+            for execution in executions:
+
+                if not isinstance(execution, dict):
+                    continue
+
+                # Fetch the complete date and time directly from JSON.
+                date_time = execution.get(
+                    "date_time", ""
+                )
+
+                duration = execution.get(
+                    "Dur", ""
+                )
+
+                mode = get_mode(execution)
+
+                final_status = execution.get(
+                    "final_status", ""
+                )
+
+                failure_reasons = get_failure_reasons(
+                    execution
+                )
+
+                if first_execution:
+
+                    writer.writerow([
+                        serial_number,
+                        procedure_name,
+                        date_time,
+                        duration,
+                        mode,
+                        final_status,
+                        failure_reasons
+                    ])
+
+                    first_execution = False
+                    serial_number += 1
+                    total_procedures += 1
+
+                else:
+
+                    writer.writerow([
+                        "",
+                        "",
+                        date_time,
+                        duration,
+                        mode,
+                        final_status,
+                        failure_reasons
+                    ])
+
+                total_executions += 1
+
+    print("\nConversion completed successfully!")
+
+    print("JSON file:", os.path.basename(json_path))
+    print("CSV file:", os.path.basename(csv_path))
+
+    print("Total procedures:", total_procedures)
+    print("Total executions:", total_executions)
+
+    print("\nCSV saved at:")
+    print(csv_path)
+
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+
+    try:
+        convert_json_to_csv()
+
+    except Exception as error:
+        print("\nERROR:", str(error))
+```
+
+### How to generate your updated CSV
+
+1. Save the revised `json_to_csv.py`.
+
+2. Keep your existing JSON file.
+
+3. Open PyCharm Terminal.
+
+4. Run:
+
+Bash
+
+```
+python json_to_csv.py
+```
+
+5. Open the newly generated CSV in your `output` folder.
+
+Important: Your parser currently stores dates in JSON as `YYYY-MM-DD HH:MM:SS.mmm`. This code preserves that exact value in `Date_Time`. It does not convert it back to the original PDF's `01-Oct-2024` display format.
+
+Your final project structure remains unchanged:
+
+```
+visualisation/
+│
+├── main.py
+├── pdf_parser.py
+├── json_to_csv.py
+│
+├── input/
+│   └── PDF files
+│
+└── output/
+    ├── output_timestamp.json
+    └── output_timestamp.csv
+```
+
+We are now retaining the complete execution timestamp and every available failure reason with its STEP ID in the CSV.
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+Yes. We'll modify `json_to_csv.py` so that only the latest CSV is retained. Whenever you generate a new CSV, the previous generated CSV will be deleted and replaced with the new one.
+
+Add this function to your existing `json_to_csv.py`:
+
+Python
+
+```
+def remove_old_csv_files():
+    """Remove previously generated CSV files."""
+
+    pattern = os.path.join(OUTPUT_DIR, "output_*.csv")
+
+    for path in glob.glob(pattern):
+        if os.path.isfile(path):
+            os.remove(path)
+```
+
+Then, inside `convert_json_to_csv()`, immediately before:
+
+Python
+
+```
+with open(
+    csv_path,
+    "w",
+    newline="",
+    encoding="utf-8-sig"
+) as csv_file:
+```
+
+add:
+
+Python
+
+```
+# Remove previous generated CSV files.
+remove_old_csv_files()
+```
+
+### Final behaviour
+
+Suppose your output folder currently contains:
+
+```
+output/
+├── output_2026-11-10_10-30-00.json
+├── output_2026-11-10_10-30-00.csv
+├── output_2026-11-10_11-30-00.csv
+└── output_2026-11-10_12-30-00.csv
+```
+
+After generating a new CSV:
+
+```
+output/
+├── output_2026-11-10_10-30-00.json
+└── output_2026-11-10_10-30-00.csv
+```
+
+Only the newly generated CSV remains.
+
+One precaution: This deletes matching old CSV files before writing the new one. A safer implementation would write and validate the new CSV first, then delete the old ones. I recommend that approach so an error during generation doesn't leave you without a CSV.
+
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FINAL ONE CHANGE 
+
+
+
+Absolutely. This is the consolidated final version of `json_to_csv.py`, incorporating all the changes we discussed.
+
+### Final features
+
+1. Reads the latest generated JSON file.
+
+2. Keeps each procedure name only in its first row.
+
+3. Lists every execution separately, oldest to newest.
+
+4. Fetches the complete date and time from JSON, including milliseconds.
+
+5. Uses the heading `Date_Time`.
+
+6. Uses `Duration(Seconds)` as the duration heading.
+
+7. Identifies Auto, Manual or Both modes.
+
+8. Displays final Success or Failure status.
+
+9. Extracts all failure reasons with their respective STEP IDs.
+
+10. Generates a CSV filename using the current date and time.
+
+11. Replaces the previous CSV and removes other old generated CSV files.
+
+12. Leaves `main.py`, `pdf_parser.py` and existing JSON files unchanged.
+
+## Complete final `json_to_csv.py`
+
+Remove your previous code and paste this entire version.
+
+Python
+
+```
+# json_to_csv.py
+# Convert generated PDF-to-JSON output into a grouped CSV report.
+# Compatible with Python 3.6.5.
+
+import os
+import glob
+import json
+import csv
+import tempfile
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+
+def get_latest_json():
+    """Find the latest generated JSON file."""
+
+    pattern = os.path.join(OUTPUT_DIR, "output_*.json")
+    json_files = glob.glob(pattern)
+
+    if not json_files:
+        raise FileNotFoundError(
+            "No generated JSON files found in output folder."
+        )
+
+    return max(json_files, key=os.path.getmtime)
+
+
+def get_csv_path():
+    """Generate CSV filename using current date and time."""
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    csv_name = "output_" + timestamp + ".csv"
+
+    return os.path.join(OUTPUT_DIR, csv_name)
+
+
+def get_mode(execution):
+    """Determine Auto, Manual or Both mode."""
+
+    mode_data = execution.get("mode_executions", {})
+
+    auto_data = mode_data.get("auto", {})
+    manual_data = mode_data.get("manual", {})
+
+    status_names = [
+        "success",
+        "failure",
+        "progress",
+        "suspend"
+    ]
+
+    auto_has_steps = any(
+        auto_data.get(status, [])
+        for status in status_names
+    )
+
+    manual_has_steps = any(
+        manual_data.get(status, [])
+        for status in status_names
+    )
+
+    if auto_has_steps and manual_has_steps:
+        return "Both (Auto + Manual)"
+
+    if auto_has_steps:
+        return "Auto"
+
+    if manual_has_steps:
+        return "Manual"
+
+    return "Unknown"
+
+
+def get_datetime_sort_key(execution):
+    """Sort executions using complete date and time."""
+
+    date_value = execution.get("date_time", "")
+
+    if not date_value:
+        return (1, datetime.max)
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S"
+    ]
+
+    for date_format in formats:
+        try:
+            parsed_date = datetime.strptime(
+                date_value,
+                date_format
+            )
+
+            return (0, parsed_date)
+
+        except ValueError:
+            continue
+
+    return (1, datetime.max)
+
+
+def get_failure_reasons(execution):
+    """Extract all failure reasons with their STEP IDs."""
+
+    reasons = execution.get("final_status_reason", [])
+
+    if not isinstance(reasons, list):
+        return ""
+
+    formatted_reasons = []
+
+    for reason_item in reasons:
+
+        if not isinstance(reason_item, dict):
+            continue
+
+        for step_id, description in reason_item.items():
+
+            if description:
+                formatted_reasons.append(
+                    str(step_id) + ": " + str(description)
+                )
+
+    return "\n".join(formatted_reasons)
+
+
+def remove_old_csv_files():
+    """Remove old generated CSV files."""
+
+    pattern = os.path.join(OUTPUT_DIR, "output_*.csv")
+
+    for old_path in glob.glob(pattern):
+
+        if os.path.isfile(old_path):
+            os.remove(old_path)
+
+
+def write_csv_safely(csv_path, data):
+    """
+    Generate and validate a temporary CSV.
+    Replace the previous CSV files only after successful generation.
+    """
+
+    headers = [
+        "Si No",
+        "Procedure Name",
+        "Date_Time",
+        "Duration(Seconds)",
+        "Mode",
+        "Final Status",
+        "Failure Reasons"
+    ]
+
+    serial_number = 1
+    total_procedures = 0
+    total_executions = 0
+
+    temp_path = None
+
+    try:
+
+        fd, temp_path = tempfile.mkstemp(
+            prefix="csv_temp_",
+            suffix=".csv",
+            dir=OUTPUT_DIR
+        )
+
+        os.close(fd)
+
+        with open(
+            temp_path,
+            "w",
+            newline="",
+            encoding="utf-8-sig"
+        ) as csv_file:
+
+            writer = csv.writer(csv_file)
+
+            writer.writerow(headers)
+
+            for procedure_name, procedure_data in data.items():
+
+                if procedure_name == "Insights":
+                    continue
+
+                if not isinstance(procedure_data, dict):
+                    continue
+
+                executions = procedure_data.get(
+                    "procedures", []
+                )
+
+                if not isinstance(executions, list):
+                    continue
+
+                executions = [
+                    item for item in executions
+                    if isinstance(item, dict)
+                ]
+
+                if not executions:
+                    continue
+
+                # Oldest execution first.
+                executions = sorted(
+                    executions,
+                    key=get_datetime_sort_key
+                )
+
+                first_execution = True
+
+                for execution in executions:
+
+                    # Preserve complete JSON date and time.
+                    date_time = execution.get(
+                        "date_time", ""
+                    )
+
+                    duration = execution.get(
+                        "Dur", ""
+                    )
+
+                    mode = get_mode(execution)
+
+                    final_status = execution.get(
+                        "final_status", ""
+                    )
+
+                    failure_reasons = get_failure_reasons(
+                        execution
+                    )
+
+                    if first_execution:
+
+                        writer.writerow([
+                            serial_number,
+                            procedure_name,
+                            date_time,
+                            duration,
+                            mode,
+                            final_status,
+                            failure_reasons
+                        ])
+
+                        serial_number += 1
+                        total_procedures += 1
+                        first_execution = False
+
+                    else:
+
+                        writer.writerow([
+                            "",
+                            "",
+                            date_time,
+                            duration,
+                            mode,
+                            final_status,
+                            failure_reasons
+                        ])
+
+                    total_executions += 1
+
+        # Validate temporary CSV.
+        with open(
+            temp_path,
+            "r",
+            encoding="utf-8-sig",
+            newline=""
+        ) as check_file:
+
+            reader = csv.reader(check_file)
+            rows = list(reader)
+
+            if not rows or rows[0] != headers:
+                raise ValueError(
+                    "Generated CSV validation failed."
+                )
+
+            if len(rows) != total_executions + 1:
+                raise ValueError(
+                    "CSV execution count validation failed."
+                )
+
+        # Remove old CSVs only after the new CSV is ready.
+        remove_old_csv_files()
+
+        # Move the validated temporary CSV into its final location.
+        os.replace(temp_path, csv_path)
+        temp_path = None
+
+        return total_procedures, total_executions
+
+    finally:
+
+        if temp_path and os.path.exists(temp_path):
+
+            try:
+                os.remove(temp_path)
+
+            except OSError:
+                pass
+
+
+def convert_json_to_csv():
+
+    print("=" * 60)
+    print("JSON TO CSV CONVERTER")
+    print("=" * 60)
+
+    if not os.path.isdir(OUTPUT_DIR):
+        raise RuntimeError(
+            "Output folder does not exist."
+        )
+
+    # Find latest JSON.
+    json_path = get_latest_json()
+
+    print("\nReading JSON:", os.path.basename(json_path))
+
+    with open(
+        json_path,
+        "r",
+        encoding="utf-8"
+    ) as json_file:
+
+        data = json.load(json_file)
+
+    # Generate filename using current date and time.
+    csv_path = get_csv_path()
+
+    total_procedures, total_executions = write_csv_safely(
+        csv_path,
+        data
+    )
+
+    print("\nCSV generated successfully!")
+
+    print("JSON file:", os.path.basename(json_path))
+    print("CSV file:", os.path.basename(csv_path))
+
+    print("Total procedures:", total_procedures)
+    print("Total executions:", total_executions)
+
+    print("\nCSV saved at:")
+    print(csv_path)
+
+    print("\nPrevious generated CSV files have been removed.")
+
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+
+    try:
+        convert_json_to_csv()
+
+    except Exception as error:
+
+        print("\nERROR:", str(error))
+```
+
+## How to run it
+
+Step 1. Save the file in PyCharm.
+
+Step 2. Close any CSV files currently open in Excel. This is important because Windows may lock them.
+
+Step 3. Open PyCharm Terminal and execute:
+
+Bash
+
+```
+python json_to_csv.py
+```
+
+Step 4. Check your `output` folder.
+
+Expected structure:
+
+```
+visualisation/
+│
+├── main.py
+├── pdf_parser.py
+├── json_to_csv.py
+│
+├── input/
+│   └── your_pdf_files.pdf
+│
+└── output/
+    ├── output_2026-11-11_14-30-00.json
+    └── output_2026-11-11_14-45-00.csv
+```
+
+The timestamps are examples. The CSV timestamp will reflect when the CSV is generated.
+
+One important note: If an old CSV is open or locked by Windows, deletion can fail. In that case, the new code will report an error rather than silently claiming that replacement succeeded. Close Excel and run it again.
+
+Your next step is simply to save this final file and run it. Send me the terminal output so we can confirm the replacement, timestamp and failure-reason extraction.
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
