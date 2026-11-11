@@ -1,0 +1,1344 @@
+Yes. I'll reconstruct the project as a complete, fresh implementation, keeping it compatible with Python 3.6.5.
+
+We'll use the following final structure:
+
+```
+visualisation/
+│
+├── app.py
+├── main.py
+├── pdf_parser.py
+├── dashboard.py
+├── subsystems.json
+├── requirements.txt
+│
+├── input/
+├── output/
+│
+├── static/
+│   ├── style.css
+│   └── chart.min.js
+│
+└── templates/
+    └── index.html
+```
+
+## Complete reconstructed files
+
+I'll preserve the agreed functionality:
+
+1. Upload multiple PDFs.
+
+2. Extract procedure execution details.
+
+3. Generate JSON output.
+
+4. Retrieve subsystem names using the project name (API placeholder).
+
+5. Retrieve procedure filenames for each subsystem (API placeholder).
+
+6. Automatically generate `subsystems.json`.
+
+7. Overall date filtering.
+
+8. Custom start-date and end-date filtering.
+
+9. Count only the latest execution of each procedure within the selected period.
+
+10. Calculate success and failure counts.
+
+11. Display subsystem-wise bar charts.
+
+12. Display unmatched, ambiguous and unassigned procedures.
+
+## Important implementation detail
+
+The actual API documentation is still unavailable, so I'll provide clearly marked API integration functions. The rest of the application will be structured to work without inventing API endpoints or authentication details.
+
+I also need to avoid inventing the original PDF report format. The PDF extraction implementation below is therefore a basic reconstruction, not a verified replacement for your original parser.
+
+### 1. `requirements.txt`
+
+```
+Flask==2.2.5
+Werkzeug==2.2.3
+PyPDF2==3.0.1
+requests==2.28.2
+```
+
+### 2. `subsystems.json`
+
+JSON
+
+```
+{}
+```
+
+### 3. `pdf_parser.py`
+
+Python
+
+```
+# pdf_parser.py
+# Basic PDF text extraction - Python 3.6.5 compatible
+
+import re
+from PyPDF2 import PdfReader
+
+
+def extract_pdf_text(pdf_path):
+    reader = PdfReader(pdf_path)
+    pages = []
+
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+
+    return "\n".join(pages)
+
+
+def extract_procedures(pdf_path):
+    text = extract_pdf_text(pdf_path)
+
+    procedures = []
+
+    # Basic reconstruction pattern.
+    # Adapt these patterns to your actual PDF report format.
+    date_pattern = re.compile(
+        r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)'
+    )
+
+    for match in date_pattern.finditer(text):
+        date_time = match.group(1)
+
+        following_text = text[match.end():match.end() + 300]
+
+        status_match = re.search(
+            r'\b(SUCCESS|FAILURE)\b',
+            following_text,
+            re.IGNORECASE
+        )
+
+        if status_match:
+            procedures.append({
+                "date_time": date_time,
+                "final_status": status_match.group(1).lower()
+            })
+
+    return procedures
+```
+
+### 4. `main.py`
+
+Python
+
+```
+# main.py
+
+import os
+import json
+
+from pdf_parser import extract_procedures
+
+
+def process_pdfs(input_folder, output_folder, project_name=""):
+
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    output_data = {}
+
+    for filename in os.listdir(input_folder):
+
+        if not filename.lower().endswith(".pdf"):
+            continue
+
+        pdf_path = os.path.join(input_folder, filename)
+
+        procedure_name = os.path.splitext(filename)[0]
+
+        try:
+            executions = extract_procedures(pdf_path)
+
+            output_data[procedure_name] = {
+                "procedures": executions
+            }
+
+        except Exception as error:
+            print("Error processing {}: {}".format(
+                filename, error
+            ))
+
+    output_path = os.path.join(
+        output_folder,
+        "{}_output.json".format(project_name or "project")
+    )
+
+    with open(output_path, "w") as output_file:
+        json.dump(output_data, output_file, indent=4)
+
+    return output_path
+```
+
+### 5. `dashboard.py`
+
+Python
+
+```
+# dashboard.py
+# Python 3.6.5 compatible
+
+import os
+import json
+import re
+import difflib
+
+from datetime import datetime
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SUBSYSTEM_FILE = os.path.join(BASE_DIR, "subsystems.json")
+
+SIMILARITY_THRESHOLD = 0.90
+
+
+def normalize_name(name):
+
+    name = os.path.basename(str(name)).strip().lower()
+    name = re.sub(r"\s+", "", name)
+
+    return name
+
+
+def similarity_score(name1, name2):
+
+    return difflib.SequenceMatcher(
+        None,
+        normalize_name(name1),
+        normalize_name(name2)
+    ).ratio()
+
+
+def parse_datetime(value):
+
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S"
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(str(value).strip(), fmt)
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
+def load_subsystems():
+
+    with open(SUBSYSTEM_FILE, "r") as file:
+        return json.load(file)
+
+
+def filter_procedure_data(
+    procedure_data,
+    start_date=None,
+    end_date=None
+):
+
+    executions = procedure_data.get("procedures", [])
+
+    valid = []
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time")
+        )
+
+        if execution_date is None:
+            continue
+
+        if start_date and execution_date.date() < start_date:
+            continue
+
+        if end_date and execution_date.date() > end_date:
+            continue
+
+        valid.append((execution_date, execution))
+
+    if not valid:
+        return None
+
+    return max(valid, key=lambda item: item[0])[1]
+
+
+def find_best_match(target_name, json_names):
+
+    target = normalize_name(target_name)
+
+    exact = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact) == 1:
+        return exact[0], "exact"
+
+    if len(exact) > 1:
+        return None, "ambiguous"
+
+    scored = []
+
+    for name in json_names:
+
+        score = similarity_score(target_name, name)
+
+        if score >= SIMILARITY_THRESHOLD:
+            scored.append((name, score))
+
+    if not scored:
+        return None, "unmatched"
+
+    scored.sort(key=lambda item: item[1], reverse=True)
+
+    highest = scored[0][1]
+
+    best = [
+        item for item in scored
+        if abs(item[1] - highest) < 0.000001
+    ]
+
+    if len(best) != 1:
+        return None, "ambiguous"
+
+    return best[0][0], "similar"
+
+
+def get_date_range(json_procedures):
+
+    dates = []
+
+    for data in json_procedures.values():
+
+        for execution in data.get("procedures", []):
+
+            if not isinstance(execution, dict):
+                continue
+
+            parsed = parse_datetime(
+                execution.get("date_time")
+            )
+
+            if parsed:
+                dates.append(parsed)
+
+    if not dates:
+        return "Date range unavailable"
+
+    return "{} to {}".format(
+        min(dates).strftime("%d-%m-%Y"),
+        max(dates).strftime("%d-%m-%Y")
+    )
+
+
+def process_dashboard(
+    json_path,
+    project_name="",
+    start_date=None,
+    end_date=None
+):
+
+    with open(json_path, "r") as file:
+        json_data = json.load(file)
+
+    json_procedures = {
+        name: data
+        for name, data in json_data.items()
+        if name != "Insights" and isinstance(data, dict)
+    }
+
+    subsystems = load_subsystems()
+
+    json_names = list(json_procedures.keys())
+
+    assigned_names = set()
+    reserved_names = set()
+
+    results = []
+
+    for subsystem_name, configured_names in subsystems.items():
+
+        success = []
+        failure = []
+        unmatched = []
+        ambiguous = []
+
+        for configured_name in configured_names:
+
+            matched_name, match_type = find_best_match(
+                configured_name,
+                json_names
+            )
+
+            if matched_name is None:
+
+                if match_type == "ambiguous":
+                    ambiguous.append(configured_name)
+
+                else:
+                    unmatched.append(configured_name)
+
+                continue
+
+            if matched_name in assigned_names:
+                ambiguous.append(configured_name)
+                reserved_names.add(matched_name)
+                continue
+
+            assigned_names.add(matched_name)
+
+            latest = filter_procedure_data(
+                json_procedures[matched_name],
+                start_date,
+                end_date
+            )
+
+            if latest is None:
+                unmatched.append(configured_name)
+                continue
+
+            status = str(
+                latest.get("final_status", "")
+            ).strip().lower()
+
+            if status == "success":
+                success.append(configured_name)
+
+            elif status == "failure":
+                failure.append(configured_name)
+
+            else:
+                unmatched.append(configured_name)
+
+        total = len(success) + len(failure)
+
+        results.append({
+            "name": subsystem_name,
+            "success": success,
+            "failure": failure,
+            "unmatched": unmatched,
+            "ambiguous": ambiguous,
+            "success_count": len(success),
+            "failure_count": len(failure),
+            "unmatched_count": len(unmatched),
+            "ambiguous_count": len(ambiguous),
+            "total": total,
+            "success_percentage": round(
+                len(success) * 100.0 / total, 2
+            ) if total else 0,
+            "failure_percentage": round(
+                len(failure) * 100.0 / total, 2
+            ) if total else 0
+        })
+
+    unassigned_success = []
+    unassigned_failure = []
+
+    for name, data in json_procedures.items():
+
+        if name in assigned_names or name in reserved_names:
+            continue
+
+        latest = filter_procedure_data(
+            data,
+            start_date,
+            end_date
+        )
+
+        if latest is None:
+            continue
+
+        status = str(
+            latest.get("final_status", "")
+        ).strip().lower()
+
+        if status == "success":
+            unassigned_success.append(name)
+
+        elif status == "failure":
+            unassigned_failure.append(name)
+
+    return {
+        "project_name": project_name,
+        "date_range": get_date_range(json_procedures),
+        "subsystems": results,
+        "unassigned_procedures": {
+            "success": unassigned_success,
+            "failure": unassigned_failure,
+            "success_count": len(unassigned_success),
+            "failure_count": len(unassigned_failure),
+            "total": (
+                len(unassigned_success)
+                + len(unassigned_failure)
+            )
+        }
+    }
+```
+
+### 6. `app.py`
+
+Python
+
+```
+# app.py
+# Flask application
+
+import os
+import json
+import requests
+
+from datetime import datetime
+
+from flask import (
+    Flask,
+    render_template,
+    request,
+    flash,
+    redirect,
+    url_for
+)
+
+from main import process_pdfs
+from dashboard import process_dashboard
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+INPUT_FOLDER = os.path.join(BASE_DIR, "input")
+OUTPUT_FOLDER = os.path.join(BASE_DIR, "output")
+
+SUBSYSTEM_FILE = os.path.join(BASE_DIR, "subsystems.json")
+
+os.makedirs(INPUT_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+app = Flask(__name__)
+
+app.secret_key = "replace-with-a-secure-secret"
+
+
+# --------------------------------------------------
+# API INTEGRATION PLACEHOLDERS
+# --------------------------------------------------
+
+def get_project_subsystems(project_name):
+
+    # TODO: Add actual API endpoint and authentication
+    # after receiving company API documentation.
+
+    raise NotImplementedError(
+        "Company subsystem API is not configured."
+    )
+
+
+def get_subsystem_procedures(subsystem_name):
+
+    # TODO: Add actual API endpoint and authentication
+    # after receiving company API documentation.
+
+    raise NotImplementedError(
+        "Company procedure API is not configured."
+    )
+
+
+def update_subsystems_json(project_name):
+
+    subsystem_names = get_project_subsystems(project_name)
+
+    subsystem_data = {}
+
+    for subsystem in subsystem_names:
+
+        subsystem_data[subsystem] = (
+            get_subsystem_procedures(subsystem)
+        )
+
+    with open(SUBSYSTEM_FILE, "w") as file:
+        json.dump(subsystem_data, file, indent=4)
+
+    return subsystem_data
+
+
+# --------------------------------------------------
+# DASHBOARD ROUTE
+# --------------------------------------------------
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+
+    dashboard_data = None
+
+    if request.method == "POST":
+
+        try:
+
+            project_name = request.form.get(
+                "project_name", ""
+            ).strip()
+
+            if not project_name:
+                raise ValueError("Enter a project name.")
+
+            date_filter = request.form.get(
+                "date_filter", "overall"
+            )
+
+            start_date = None
+            end_date = None
+
+            if date_filter == "custom":
+
+                start_text = request.form.get(
+                    "start_date", ""
+                )
+
+                end_text = request.form.get(
+                    "end_date", ""
+                )
+
+                if not start_text or not end_text:
+                    raise ValueError(
+                        "Select both start and end dates."
+                    )
+
+                start_date = datetime.strptime(
+                    start_text, "%Y-%m-%d"
+                ).date()
+
+                end_date = datetime.strptime(
+                    end_text, "%Y-%m-%d"
+                ).date()
+
+                if start_date > end_date:
+                    raise ValueError(
+                        "Start date cannot be after end date."
+                    )
+
+            # API integration will be enabled here
+            # once the company API documentation is available.
+
+            files = request.files.getlist("pdf_files")
+
+            if not files or not any(f.filename for f in files):
+                raise ValueError("Upload at least one PDF.")
+
+            for uploaded_file in files:
+
+                if not uploaded_file.filename.lower().endswith(".pdf"):
+                    continue
+
+                save_path = os.path.join(
+                    INPUT_FOLDER,
+                    os.path.basename(uploaded_file.filename)
+                )
+
+                uploaded_file.save(save_path)
+
+            json_path = process_pdfs(
+                INPUT_FOLDER,
+                OUTPUT_FOLDER,
+                project_name
+            )
+
+            dashboard_data = process_dashboard(
+                json_path,
+                project_name,
+                start_date,
+                end_date
+            )
+
+        except Exception as error:
+
+            flash(str(error), "error")
+
+    return render_template(
+        "index.html",
+        dashboard_data=dashboard_data
+    )
+
+
+if __name__ == "__main__":
+
+    app.run(
+        host="127.0.0.1",
+        port=5000,
+        debug=False
+    )
+```
+
+### 7. `templates/index.html`
+
+HTML
+
+```
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Project Test Dashboard</title>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+
+    <script src="{{ url_for('static', filename='chart.min.js') }}"></script>
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>Project Test Dashboard</h1>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+            <div class="message">{{ message }}</div>
+        {% endfor %}
+    {% endwith %}
+
+    <form method="POST"
+          enctype="multipart/form-data">
+
+        <label>Project Name</label>
+
+        <input type="text"
+               name="project_name"
+               placeholder="Enter project name"
+               required>
+
+        <label>Upload PDF Files</label>
+
+        <input type="file"
+               name="pdf_files"
+               accept=".pdf"
+               multiple
+               required>
+
+        <div class="date-filter-section">
+
+            <h3>Select Date Range</h3>
+
+            <label>
+                <input type="radio"
+                       name="date_filter"
+                       value="overall"
+                       checked
+                       onchange="toggleDateFilter()">
+                Overall
+            </label>
+
+            <label>
+                <input type="radio"
+                       name="date_filter"
+                       value="custom"
+                       onchange="toggleDateFilter()">
+                Custom Date Range
+            </label>
+
+            <div id="custom-date-fields">
+
+                <label>Start Date</label>
+
+                <input type="date"
+                       name="start_date"
+                       id="start_date">
+
+                <label>End Date</label>
+
+                <input type="date"
+                       name="end_date"
+                       id="end_date">
+
+            </div>
+
+        </div>
+
+        <button type="submit">
+            Generate Dashboard
+        </button>
+
+    </form>
+
+
+    {% if dashboard_data %}
+
+        <hr>
+
+        <h2>
+            {{ dashboard_data.project_name }}
+        </h2>
+
+        <p>
+            Available execution dates:
+            {{ dashboard_data.date_range }}
+        </p>
+
+        <h2>Subsystem Results</h2>
+
+        <canvas id="resultsChart"></canvas>
+
+        {% for subsystem in dashboard_data.subsystems %}
+
+            <div class="card">
+
+                <h3>{{ subsystem.name }}</h3>
+
+                <p>Success: {{ subsystem.success_count }}</p>
+
+                <p>Failure: {{ subsystem.failure_count }}</p>
+
+                <p>Unmatched: {{ subsystem.unmatched_count }}</p>
+
+                <p>Ambiguous: {{ subsystem.ambiguous_count }}</p>
+
+                <p>Success rate: {{ subsystem.success_percentage }}%</p>
+
+                <h4>Successful Procedures</h4>
+
+                {% for name in subsystem.success %}
+                    <p class="success">{{ name }}</p>
+                {% endfor %}
+
+                <h4>Failed Procedures</h4>
+
+                {% for name in subsystem.failure %}
+                    <p class="failure">{{ name }}</p>
+                {% endfor %}
+
+                <h4>Unmatched Procedures</h4>
+
+                {% for name in subsystem.unmatched %}
+                    <p>{{ name }}</p>
+                {% endfor %}
+
+                <h4>Ambiguous Procedures</h4>
+
+                {% for name in subsystem.ambiguous %}
+                    <p>{{ name }}</p>
+                {% endfor %}
+
+            </div>
+
+        {% endfor %}
+
+
+        <div class="card">
+
+            <h2>Unassigned Procedures</h2>
+
+            <p>
+                Success:
+                {{ dashboard_data.unassigned_procedures.success_count }}
+            </p>
+
+            <p>
+                Failure:
+                {{ dashboard_data.unassigned_procedures.failure_count }}
+            </p>
+
+            <h3>Successful</h3>
+
+            {% for name in dashboard_data.unassigned_procedures.success %}
+                <p class="success">{{ name }}</p>
+            {% endfor %}
+
+            <h3>Failed</h3>
+
+            {% for name in dashboard_data.unassigned_procedures.failure %}
+                <p class="failure">{{ name }}</p>
+            {% endfor %}
+
+        </div>
+
+    {% endif %}
+
+</div>
+
+
+<script>
+
+function toggleDateFilter() {
+
+    var selected = document.querySelector(
+        'input[name="date_filter"]:checked'
+    ).value;
+
+    var fields = document.getElementById(
+        "custom-date-fields"
+    );
+
+    var start = document.getElementById("start_date");
+    var end = document.getElementById("end_date");
+
+    if (selected === "custom") {
+
+        fields.style.display = "block";
+
+        start.required = true;
+        end.required = true;
+
+    } else {
+
+        fields.style.display = "none";
+
+        start.required = false;
+        end.required = false;
+
+    }
+
+}
+
+toggleDateFilter();
+
+
+{% if dashboard_data %}
+
+var subsystemNames = [
+    {% for subsystem in dashboard_data.subsystems %}
+        {{ subsystem.name | tojson }},
+    {% endfor %}
+];
+
+var successCounts = [
+    {% for subsystem in dashboard_data.subsystems %}
+        {{ subsystem.success_count }},
+    {% endfor %}
+];
+
+var failureCounts = [
+    {% for subsystem in dashboard_data.subsystems %}
+        {{ subsystem.failure_count }},
+    {% endfor %}
+];
+
+new Chart(
+    document.getElementById("resultsChart"),
+    {
+        type: "bar",
+
+        data: {
+            labels: subsystemNames,
+
+            datasets: [
+                {
+                    label: "Success",
+                    data: successCounts,
+                    backgroundColor: "#28a745"
+                },
+                {
+                    label: "Failure",
+                    data: failureCounts,
+                    backgroundColor: "#dc3545"
+                }
+            ]
+        },
+
+        options: {
+            responsive: true,
+            scales: {
+                yAxes: [{
+                    ticks: {
+                        beginAtZero: true
+                    }
+                }]
+            }
+        }
+    }
+);
+
+{% endif %}
+
+</script>
+
+</body>
+</html>
+```
+
+### 8. `static/style.css`
+
+CSS
+
+```
+body {
+    font-family: Arial, sans-serif;
+    background: #f4f6f9;
+    margin: 0;
+    padding: 20px;
+    color: #333;
+}
+
+.container {
+    max-width: 1150px;
+    margin: auto;
+}
+
+h1 {
+    text-align: center;
+    color: #263b5e;
+}
+
+form,
+.card {
+    background: white;
+    padding: 22px;
+    margin: 20px 0;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+}
+
+label {
+    display: block;
+    font-weight: bold;
+    margin: 12px 0 8px;
+}
+
+input[type="text"],
+input[type="date"],
+input[type="file"] {
+    width: 100%;
+    padding: 11px;
+    box-sizing: border-box;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+.date-filter-section {
+    margin: 25px 0;
+    padding: 20px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+}
+
+.date-filter-section label {
+    display: inline-block;
+    margin-right: 20px;
+}
+
+#custom-date-fields {
+    display: none;
+    margin-top: 15px;
+}
+
+button {
+    background: #2867b2;
+    color: white;
+    padding: 13px 25px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 15px;
+}
+
+button:hover {
+    background: #194e8a;
+}
+
+.card h3 {
+    color: #263b5e;
+}
+
+.success {
+    color: #198754;
+}
+
+.failure {
+    color: #dc3545;
+}
+
+.message {
+    padding: 12px;
+    background: #ffe5e5;
+    color: #a00000;
+    border-radius: 5px;
+}
+
+@media (max-width: 700px) {
+    body {
+        padding: 10px;
+    }
+
+    .date-filter-section label {
+        display: block;
+    }
+}
+```
+
+## Quick startup instructions
+
+1. Put all files in the folder structure shown above.
+
+2. Keep your actual `chart.min.js` inside `static/`.
+
+3. Install dependencies:
+
+Bash
+
+```
+pip install -r requirements.txt
+```
+
+4. Run:
+
+Bash
+
+```
+python app.py
+```
+
+5. Open:
+
+```
+http://127.0.0.1:5000
+```
+
+Before relying on this version
+
+This is a fresh baseline reconstruction, not a verified drop-in replacement for your original project. In particular:
+
+* The PDF extraction pattern must be adapted to your actual PDF format.
+
+* The chart expects Chart.js 2.x; use a compatible local copy.
+
+* The API functions intentionally remain unconfigured.
+
+* The upload folder currently retains previous PDFs, so clear it between separate project runs to avoid mixing projects.
+
+* The existing subsystem matching and ambiguous-candidate handling may need further refinement.
+
+Your next milestone is simple: get one sample PDF processed correctly, then connect the actual API documentation.
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+Yes, I'll explain the complete workflow and file structure clearly. One important thing first: the files I reconstructed are not yet confirmed working. They provide a basic application structure, but the PDF extraction and API integration still need actual project-specific information.
+
+Let's establish exactly what works, what remains, and how the dashboard gets generated.
+
+# 1. Complete project structure
+
+Your final project should look like this:
+
+visualisation/
+
+app.py
+
+Flask application and workflow coordination
+
+main.py
+
+PDF processing and JSON generation
+
+pdf_parser.py
+
+Extract data from PDF reports
+
+dashboard.py
+
+Date filtering, matching and calculations
+
+subsystems.json
+
+Subsystem and procedure configuration
+
+requirements.txt
+
+Python dependencies
+
+input/
+
+Uploaded PDFs
+
+output/
+
+Generated JSON files
+
+static/
+
+`style.css`
+
+`chart.min.js`
+
+templates/
+
+`index.html`
+
+# 2. How the application will produce the dashboard
+
+This is the complete workflow:
+
+User opens the website
+
+Enters project name and uploads PDFs
+
+app.py
+
+Receives project name, PDFs and date selection
+
+API integration (pending)
+
+Retrieves subsystem names and procedure filenames
+
+subsystems.json
+
+Stores retrieved subsystem configuration
+
+main.py
+
+Processes uploaded PDF files
+
+pdf_parser.py
+
+Extracts procedure names, timestamps and statuses
+
+output/project_output.json
+
+Stores extracted execution information
+
+dashboard.py
+
+Matches procedures, applies date filters and calculates results
+
+Final Dashboard
+
+Subsystem results, success/failure counts and graphs
+
+# 3. What will appear on the dashboard?
+
+The reconstructed HTML is designed to display:
+
+Project Test Dashboard
+
+Illustrative dashboard layout, not actual test results.
+
+Project name: Project ABC Date range: 10-11-2026 to 12-11-2026
+
+Subsystem Results
+
+Chart options
+
+Illustrative values only
+
+
+
+# 23
+
+Success
+
+# 6
+
+Failure
+
+Subsystem details
+
+* Power
+
+  * Successful procedures
+
+  * Failed procedures
+
+  * Unmatched procedures
+
+  * Ambiguous procedures
+
+* Engine
+
+* Control
+
+  Unassigned Procedures
+
+* Successful procedures
+
+* Failed procedures
+
+The values above are examples only.
+
+# 4. Which files need changes and which don't?
+
+This is the important file-wise checklist.
+
+| File               | Change required?                         | Purpose                              |
+| ------------------ | ---------------------------------------- | ------------------------------------ |
+| `app.py`           | Yes                                      | Flask workflow and API integration   |
+| `dashboard.py`     | Yes                                      | Date filtering and calculations      |
+| `pdf_parser.py`    | Yes, if extraction pattern differs       | PDF extraction                       |
+| `main.py`          | Possibly                                 | PDF processing and JSON generation   |
+| `index.html`       | Yes                                      | Upload form, date selection, results |
+| `style.css`        | Yes                                      | Visual styling                       |
+| `subsystems.json`  | Automatically generated                  | API response storage                 |
+| `requirements.txt` | Yes                                      | Dependencies                         |
+| `chart.min.js`     | No, if compatible version already exists | Graph rendering                      |
+
+# 5. What is working and what is not?
+
+I want to be transparent because you have limited time.
+
+| Functionality                | Current status                    |
+| ---------------------------- | --------------------------------- |
+| Flask application structure  | Implemented, untested             |
+| PDF upload interface         | Implemented, untested             |
+| PDF text extraction          | Basic reconstruction only         |
+| JSON generation              | Implemented, untested             |
+| Subsystem API retrieval      | Not implemented                   |
+| Procedure API retrieval      | Not implemented                   |
+| Dynamic `subsystems.json`    | Function written, API unavailable |
+| Overall date filtering       | Implemented, untested             |
+| Custom date filtering        | Implemented, untested             |
+| Latest execution selection   | Implemented, untested             |
+| Success/failure calculations | Implemented, untested             |
+| Dashboard HTML               | Basic implementation              |
+| Bar chart                    | Requires compatible Chart.js file |
+| Complete end-to-end workflow | Not verified                      |
+
+# 6. Which files should remain unchanged?
+
+For the current reconstructed version:
+
+* `subsystems.json` should be generated automatically once API integration is available.
+
+* `chart.min.js` can remain unchanged if it is compatible with the chart code.
+
+* `main.py` and `pdf_parser.py` should only be changed if the actual PDF format requires different extraction logic.
+
+Do not overwrite your original project files until you have backed them up.
+
+# 7. Final completion plan
+
+There are only three major things left:
+
+1. Verify PDF extraction: Make sure the actual PDF produces correct procedure names, execution timestamps and statuses.
+
+2. Complete API integration: Add the company's actual API endpoints, authentication and response handling.
+
+3. Quick end-to-end testing: Run one project and verify Overall and Custom Date Range.
+
+One important correction to the reconstructed code: it currently saves uploaded PDFs into a shared folder without clearing old files. This needs project-specific cleanup or isolation before production use to avoid mixing executions from different projects.
+
+My recommendation: Don't spend time redesigning anything. Preserve this structure, verify the PDF extraction first, and then plug in the API details. That is the shortest sensible route to your final working dashboard.
+
+
+Illustrative values only
+
+subsystem	success	failure
+Power	8	2
+Engine	6	3
+Control	9	1
