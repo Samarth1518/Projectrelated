@@ -2925,5 +2925,81 @@ def validate_execution(execution):
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+subsystems.json
 
+code----
+
+
+{
+    "Power Subsystem": [
+        "example.tst",
+        "sample.sh",
+        "power_check.tst",
+        "power_start.tst",
+        "power_shutdown.tst"
+    ],
+    "Thermal Subsystem": [
+        "thermal_check.tst",
+        "thermal_start.tst",
+        "thermal_shutdown.tst",
+        "temperature_test.tst",
+        "cooling_test.tst"
+    ],
+    "Communication Subsystem": [
+        "communication_check.tst",
+        "signal_test.tst",
+        "transmitter_test.tst",
+        "receiver_test.tst",
+        "antenna_test.tst"
+    ],
+    "Attitude Control Subsystem": [
+        "attitude_check.tst",
+        "sensor_test.tst",
+        "gyro_test.tst",
+        "control_test.tst",
+        "orientation_test.tst"
+    ],
+    "Propulsion Subsystem": [
+        "propulsion_check.tst",
+        "engine_test.tst",
+        "valve_test.tst",
+        "pressure_test.tst",
+        "fuel_test.tst"
+    ],
+    "Telemetry Subsystem": [
+        "telemetry_check.tst",
+        "data_test.tst",
+        "transmission_test.tst",
+        "telemetry_start.tst",
+        "telemetry_stop.tst"
+    ],
+    "Navigation Subsystem": [
+        "navigation_check.tst",
+        "gps_test.tst",
+        "position_test.tst",
+        "tracking_test.tst",
+        "navigation_start.tst"
+    ],
+    "Payload Subsystem": [
+        "payload_check.tst",
+        "payload_start.tst",
+        "instrument_test.tst",
+        "sensor_check.tst",
+        "payload_shutdown.tst"
+    ],
+    "Command and Data Handling": [
+        "command_check.tst",
+        "data_handling.tst",
+        "processor_test.tst",
+        "memory_test.tst",
+        "command_execution.tst"
+    ],
+    "Power Management Subsystem": [
+        "power_management.tst",
+        "voltage_test.tst",
+        "current_test.tst",
+        "battery_test.tst",
+        "distribution_test.tst"
+    ]
+}
 
