@@ -14,3 +14,6 @@ open chatgpt link
 paste this prompt 
 then put the NEWIMPLEMENTATION.txt file full       [AND REMEMBER ABOUT THE API CALLING DOCUMENT ]
 do it and then do changes 
+
+
+and then this TEMPORARY file is just experiment that's it so see that later 
