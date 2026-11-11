@@ -6,4 +6,4 @@ https://chatgpt.com/share/6aecce8f-4fec-83e8-9607-502238dc42dd
 prompts -----
 
 
-
+Like, see, these are the full, like all the project structures with all files , okay? Like, now we'll do the full thing. Like full new thing we need to do, okay? And these are the file structures, what all is there for the project, whatever it is there now. Like present whatever is there, I'll just give you the full thing, okay? And after that I'll just give you a chat which I discussed with the ChatGPT, and, like, I'll give that chat in two parts. And then, like, you should understand the full thing from the chat after, when I give this whole project structure, you should understand that full chat. And after that you should just give me the, like, we should continue like that. We should follow that chat and do like that, okay? Like from that project structure, I'll give you one by one what all to change, then we have to do according to that, okay?
