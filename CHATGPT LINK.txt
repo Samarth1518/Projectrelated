@@ -12,5 +12,5 @@ Now see, we have to do a full new thing, and for that I'll just give you the pre
 
 open chatgpt link 
 paste this prompt 
-then put the NEWIMPLEMENTATION.txt file full 
+then put the NEWIMPLEMENTATION.txt file full       [AND REMEMBER ABOUT THE API CALLING DOCUMENT ]
 do it and then do changes 
