@@ -84,3 +84,216 @@ The dashboard will not be generated if the API fails.
 The user will receive a clear error message and can retry.
 
 One important technical detail: although both processes can run simultaneously, dashboard generation must wait until both processes finish successfully. Otherwise, the comparison might use an outdated file.
+
+
+
+////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////
+
+Yes, I've gone through the complete project structure and all the code you shared. I understand how your application currently works and, more importantly, exactly what you want to change.
+
+I won't start modifying files yet. First, let me confirm my understanding so we don't make changes to the wrong part of your application.
+
+## 1. Your current application workflow
+
+Your project has these main components:
+
+| File              | Responsibility                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------ |
+| `app.py`          | Flask application, PDF uploads and dashboard generation                                    |
+| `main.py`         | Reads uploaded PDFs and generates `output.json`                                            |
+| `pdf_parser.py`   | Extracts procedure names, execution dates, statuses and other information                  |
+| `dashboard.py`    | Compares extracted procedures against subsystem configurations and prepares dashboard data |
+| `subsystems.json` | Currently contains manually maintained subsystem names and filenames                       |
+| `index.html`      | Upload interface and dashboard presentation                                                |
+| `style.css`       | Dashboard styling                                                                          |
+
+Currently, the workflow is:
+
+User enters project name and uploads PDFs
+
+User clicks Generate Dashboard
+
+PDF processing
+
+`main.py`
+
+`pdf_parser.py`
+
+output.json
+
+API request
+
+`get_subsystem_filenames`
+
+subsystems.json
+
+dashboard.py compares both JSON files
+
+Dashboard is generated
+
+The two JSON-generation processes should happen as part of the same Generate Dashboard submission.
+
+## 2. How the API integration will work
+
+Your API endpoint is currently provided as:
+
+Python
+
+```
+http://01.02.03.40:5900/api/get_subsystem_filenames
+```
+
+I will retain this dummy IP in the code and clearly mark the exact location where you need to replace it with the actual IP.
+
+The Python equivalent of your JavaScript request will use `requests.post()`.
+
+The request will send:
+
+Python
+
+```
+{
+    "project_name": project_name
+}
+```
+
+The API response is expected to look like:
+
+Python
+
+```
+{
+    "data": {
+        "POWER": [
+            "ab-abc.tst",
+            "bc-bst.tst"
+        ],
+        "ILC": [
+            "ab-sdc.tst",
+            "rc-bst.tst"
+        ],
+        "RSU": [
+            "GH-sdc.tst",
+            "DF-bst.tst"
+        ]
+    }
+}
+```
+
+The important thing I understand is:
+
+* `POWER`, `ILC` and `RSU` are dynamic subsystem names.
+
+* They must become the actual keys in `subsystems.json`.
+
+* Their respective filenames must become the values.
+
+* There can be any number of subsystems.
+
+* There is no requirement to rename them to Power Subsystem, ILC Subsystem, etc.
+
+The generated JSON will therefore look like:
+
+JSON
+
+```
+{
+    "POWER": [
+        "ab-abc.tst",
+        "bc-bst.tst"
+    ],
+    "ILC": [
+        "ab-sdc.tst",
+        "rc-bst.tst"
+    ],
+    "RSU": [
+        "GH-sdc.tst",
+        "DF-bst.tst"
+    ]
+}
+```
+
+Every successful API response will replace the previous `subsystems.json`.
+
+## 3. Important API failure handling
+
+I understand that this is particularly important.
+
+If the API request fails, returns invalid data, or does not provide the expected structure:
+
+1. Do not generate the dashboard.
+
+2. Do not overwrite the previous valid `subsystems.json`.
+
+3. Display a clear API error message.
+
+4. Allow the user to try again.
+
+I will implement safe JSON writing so that a failed API response cannot destroy your previous configuration.
+
+## 4. Date-range functionality
+
+I also understand your date requirements.
+
+The user should select:
+
+* Start date
+
+* End date
+
+For each procedure, the dashboard should consider only executions within that selected date range.
+
+If a procedure has multiple executions within that range, only its latest execution should determine its status.
+
+If a procedure has no execution within the selected date range, it should be excluded completely.
+
+If there are no procedure executions across the selected date range, display:
+
+> No procedure executions found for the selected date range.
+
+One important observation: your currently supplied `index.html` and `app.py` do not yet contain the start-date and end-date inputs. Your existing `dashboard.py` also currently finds the latest execution across all dates rather than filtering by a selected date range. These will need modifications.
+
+## 5. What I will preserve
+
+I won't unnecessarily rewrite your existing application.
+
+I intend to preserve:
+
+* Your existing PDF extraction logic.
+
+* Your existing procedure-name normalization.
+
+* Your 90% similarity matching threshold.
+
+* Your exact and ambiguous matching logic.
+
+* Your success/failure calculations.
+
+* Your unassigned procedures functionality.
+
+* Your existing dashboard layout and chart.
+
+* Your Python 3.6.5 compatibility.
+
+The main changes will be in `app.py`, `dashboard.py` and `templates/index.html`. I will also check whether any additional changes are necessary in the other files.
+
+## 6. Implementation order
+
+Since you prefer receiving the files one by one, I suggest this order:
+
+| Order | File                   | Changes                                                        |
+| ----- | ---------------------- | -------------------------------------------------------------- |
+| 1     | `app.py`               | API integration, simultaneous processing, safe error handling  |
+| 2     | `dashboard.py`         | Date filtering, latest execution selection, dynamic subsystems |
+| 3     | `templates/index.html` | Start/end date inputs and no-execution message                 |
+| 4     | `static/style.css`     | Styling for the date inputs and messages                       |
+| 5     | `subsystems.json`      | Explain its new automatically generated contents               |
+
+`main.py` and `pdf_parser.py` should remain unchanged unless an actual integration issue requires otherwise.
+
+One important commitment: I understand that you cannot test the application right now. Therefore, I'll provide complete replacement files, not isolated snippets, and check their imports, function calls, data structures and compatibility with Python 3.6.5 as carefully as possible.
+
+I also won't claim that the application has been runtime-tested when it hasn't.
+
+I've understood your existing architecture and the requested changes. We can proceed with `app.py` first.
