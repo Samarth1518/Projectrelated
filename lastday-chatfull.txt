@@ -1,0 +1,5370 @@
+Let's start with File 1: `app.py`.
+
+I'm giving you a complete replacement file, not just the sections that need changing. You can replace your existing `app.py` with this version.
+
+This version implements the most important new functionality:
+
+1. Calls your subsystem API when the user clicks Generate Dashboard.
+
+2. Sends the entered project name to the API.
+
+3. Runs PDF processing and the API request simultaneously.
+
+4. Automatically generates and replaces `subsystems.json`.
+
+5. Preserves the previous `subsystems.json` if the API fails or returns invalid data.
+
+6. Does not generate the dashboard if either processing operation fails.
+
+7. Passes the selected start date and end date to `dashboard.py`.
+
+8. Displays meaningful error messages.
+
+9. Maintains compatibility with Python 3.6.5.
+
+## 1. New `app.py` — complete code
+
+Complete replacement
+
+Python 3.6.5 compatible
+
+Python
+
+.....................................................................................................................
+
+# app.py
+# Flask application for Satellite Testing Dashboard
+# Python 3.6.5 compatible
+
+import os
+import glob
+import json
+import sys
+import threading
+
+import requests
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+from flask import (
+    Flask,
+    render_template,
+    request,
+    flash
+)
+
+from werkzeug.utils import secure_filename
+
+from dashboard import process_dashboard
+
+
+# --------------------------------------------------
+# 1. PROJECT PATHS AND CONFIGURATION
+# --------------------------------------------------
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+INPUT_DIR = os.path.join(BASE_DIR, "input")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+SUBSYSTEM_FILE = os.path.join(
+    BASE_DIR,
+    "subsystems.json"
+)
+
+ALLOWED_EXTENSIONS = set(["pdf"])
+
+
+# --------------------------------------------------
+# 2. SUBSYSTEM API CONFIGURATION
+# --------------------------------------------------
+
+# IMPORTANT:
+# Replace this dummy IP address with the actual API IP
+# provided by your sir.
+
+API_URL = (
+    "http://01.02.03.40:5900/api/get_subsystem_filenames"
+)
+
+# Maximum time to wait for the API response.
+API_TIMEOUT = (5, 30)
+
+
+# --------------------------------------------------
+# 3. FLASK APPLICATION
+# --------------------------------------------------
+
+app = Flask(__name__)
+
+app.secret_key = "satellite_dashboard_local_key"
+
+
+# Prevent two users from processing PDFs and replacing
+# the same JSON files simultaneously.
+
+PROCESSING_LOCK = threading.Lock()
+
+
+# --------------------------------------------------
+# 4. CREATE REQUIRED FOLDERS
+# --------------------------------------------------
+
+def create_folders():
+
+    for folder in [INPUT_DIR, OUTPUT_DIR]:
+
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+
+
+# --------------------------------------------------
+# 5. CHECK FILE EXTENSION
+# --------------------------------------------------
+
+def allowed_file(filename):
+
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower()
+        in ALLOWED_EXTENSIONS
+    )
+
+
+# --------------------------------------------------
+# 6. VALIDATE SELECTED DATES
+# --------------------------------------------------
+
+def validate_dates(start_date, end_date):
+    """
+    Validate the selected date range.
+
+    Expected format: YYYY-MM-DD
+    """
+
+    try:
+
+        start = datetime.strptime(
+            start_date,
+            "%Y-%m-%d"
+        )
+
+        end = datetime.strptime(
+            end_date,
+            "%Y-%m-%d"
+        )
+
+    except (ValueError, TypeError):
+
+        raise ValueError(
+            "Please select valid start and end dates."
+        )
+
+    if start > end:
+
+        raise ValueError(
+            "Start date cannot be later than end date."
+        )
+
+    return start_date, end_date
+
+
+# --------------------------------------------------
+# 7. CLEAR OLD INPUT PDF FILES
+# --------------------------------------------------
+
+def clear_old_input_pdfs():
+
+    for path in glob.glob(
+        os.path.join(INPUT_DIR, "*.pdf")
+    ):
+
+        if os.path.isfile(path):
+            os.remove(path)
+
+
+# --------------------------------------------------
+# 8. SAVE UPLOADED PDF FILES
+# --------------------------------------------------
+
+def save_uploaded_pdfs(uploaded_files):
+    """
+    Save uploaded PDFs into the input folder.
+    """
+
+    saved_count = 0
+
+    for uploaded_file in uploaded_files:
+
+        filename = secure_filename(
+            uploaded_file.filename
+        )
+
+        if not filename:
+            continue
+
+        save_path = os.path.join(
+            INPUT_DIR,
+            filename
+        )
+
+        uploaded_file.save(save_path)
+
+        saved_count += 1
+
+    if saved_count == 0:
+
+        raise RuntimeError(
+            "No valid PDF files could be saved."
+        )
+
+    return saved_count
+
+
+# --------------------------------------------------
+# 9. CALL SUBSYSTEM API
+# --------------------------------------------------
+
+def fetch_subsystems_from_api(project_name):
+    """
+    Call the subsystem API using the entered project name.
+
+    Expected API response:
+
+    {
+        "data": {
+            "POWER": [
+                "ab-abc.tst",
+                "bc-bst.tst"
+            ],
+            "ILC": [
+                "ab-sdc.tst",
+                "rc-bst.tst"
+            ]
+        }
+    }
+
+    The subsystem names returned by the API become
+    the keys in subsystems.json.
+    """
+
+    try:
+
+        response = requests.post(
+
+            API_URL,
+
+            json={
+                "project_name": project_name
+            },
+
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+
+            timeout=API_TIMEOUT
+
+        )
+
+        # Check HTTP response status.
+
+        response.raise_for_status()
+
+    except requests.exceptions.Timeout:
+
+        raise RuntimeError(
+            "Subsystem API request timed out. "
+            "Please try again."
+        )
+
+    except requests.exceptions.ConnectionError:
+
+        raise RuntimeError(
+            "Could not connect to the subsystem API. "
+            "Please check the API server and try again."
+        )
+
+    except requests.exceptions.HTTPError:
+
+        raise RuntimeError(
+            "Subsystem API returned HTTP error "
+            + str(response.status_code)
+            + ". Please try again."
+        )
+
+    except requests.exceptions.RequestException as error:
+
+        raise RuntimeError(
+            "Subsystem API request failed: "
+            + str(error)
+        )
+
+    # Convert API response into Python dictionary.
+
+    try:
+
+        api_response = response.json()
+
+    except ValueError:
+
+        raise RuntimeError(
+            "Subsystem API returned an invalid JSON response."
+        )
+
+    # Validate the outer response structure.
+
+    if not isinstance(api_response, dict):
+
+        raise RuntimeError(
+            "Invalid subsystem API response format."
+        )
+
+    subsystem_data = api_response.get("data")
+
+    if not isinstance(subsystem_data, dict):
+
+        raise RuntimeError(
+            "Subsystem API response does not contain "
+            "the expected 'data' object."
+        )
+
+    if not subsystem_data:
+
+        raise RuntimeError(
+            "The API returned no subsystems for project '"
+            + project_name + "'."
+        )
+
+    # Validate and clean the subsystem information.
+
+    clean_subsystems = {}
+
+    for subsystem_name, filenames in subsystem_data.items():
+
+        if not isinstance(subsystem_name, str):
+
+            raise RuntimeError(
+                "API returned an invalid subsystem name."
+            )
+
+        subsystem_name = subsystem_name.strip()
+
+        if not subsystem_name:
+
+            raise RuntimeError(
+                "API returned an empty subsystem name."
+            )
+
+        if subsystem_name in clean_subsystems:
+
+            raise RuntimeError(
+                "API returned duplicate subsystem names."
+            )
+
+        if not isinstance(filenames, list):
+
+            raise RuntimeError(
+                "Invalid filename list for subsystem: "
+                + subsystem_name
+            )
+
+        clean_filenames = []
+
+        for filename in filenames:
+
+            if not isinstance(filename, str):
+
+                raise RuntimeError(
+                    "Invalid filename received for subsystem: "
+                    + subsystem_name
+                )
+
+            filename = filename.strip()
+
+            if not filename:
+
+                raise RuntimeError(
+                    "An empty filename was received for subsystem: "
+                    + subsystem_name
+                )
+
+            clean_filenames.append(filename)
+
+        clean_subsystems[subsystem_name] = clean_filenames
+
+    return clean_subsystems
+
+
+# --------------------------------------------------
+# 10. SAFELY GENERATE SUBSYSTEMS.JSON
+# --------------------------------------------------
+
+def save_subsystems_safely(subsystem_data):
+    """
+    Save the new subsystem configuration safely.
+
+    The previous subsystems.json is preserved if writing
+    or JSON validation fails.
+    """
+
+    temporary_file = SUBSYSTEM_FILE + ".tmp"
+
+    try:
+
+        # Write new data into a temporary file first.
+
+        with open(
+            temporary_file,
+            "w",
+            encoding="utf-8"
+        ) as json_file:
+
+            json.dump(
+                subsystem_data,
+                json_file,
+                indent=4,
+                ensure_ascii=False
+            )
+
+            json_file.write("\n")
+
+        # Verify that the temporary JSON is valid.
+
+        with open(
+            temporary_file,
+            "r",
+            encoding="utf-8"
+        ) as json_file:
+
+            verified_data = json.load(json_file)
+
+        if verified_data != subsystem_data:
+
+            raise RuntimeError(
+                "Generated subsystem JSON verification failed."
+            )
+
+        # Replace the old file only after successful validation.
+
+        os.replace(
+            temporary_file,
+            SUBSYSTEM_FILE
+        )
+
+    except Exception:
+
+        if os.path.exists(temporary_file):
+
+            try:
+                os.remove(temporary_file)
+
+            except OSError:
+                pass
+
+        raise
+
+
+# --------------------------------------------------
+# 11. RUN EXISTING PDF CONVERTER
+# --------------------------------------------------
+
+def run_pdf_converter():
+    """
+    Execute main.py.
+
+    main.py generates output_YYYY-MM-DD_HH-MM-SS.json.
+    """
+
+    main_path = os.path.join(
+        BASE_DIR,
+        "main.py"
+    )
+
+    result = __import__("subprocess").run(
+
+        [sys.executable, main_path],
+
+        cwd=BASE_DIR,
+
+        stdout=__import__("subprocess").PIPE,
+
+        stderr=__import__("subprocess").PIPE,
+
+        universal_newlines=True
+    )
+
+    if result.returncode != 0:
+
+        error_message = (
+            result.stderr
+            or result.stdout
+            or "PDF conversion failed."
+        )
+
+        raise RuntimeError(
+            "PDF processing failed:\n" + error_message
+        )
+
+    # main.py prints the generated output path.
+    # Read that exact path instead of accidentally using
+    # an older output JSON.
+
+    output_path = None
+
+    for line in result.stdout.splitlines():
+
+        if line.strip().startswith("Output file:"):
+
+            output_path = line.split(
+                "Output file:",
+                1
+            )[1].strip()
+
+            break
+
+    if not output_path:
+
+        raise RuntimeError(
+            "PDF converter finished but did not report "
+            "the generated output JSON path."
+        )
+
+    if not os.path.isfile(output_path):
+
+        raise RuntimeError(
+            "The PDF converter did not generate "
+            "the expected output JSON file."
+        )
+
+    return output_path
+
+
+# --------------------------------------------------
+# 12. MAIN DASHBOARD ROUTE
+# --------------------------------------------------
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+
+    create_folders()
+
+    dashboard_data = None
+
+    project_name = ""
+
+    start_date = ""
+    end_date = ""
+
+    if request.method == "POST":
+
+        project_name = request.form.get(
+            "project_name",
+            ""
+        ).strip()
+
+        start_date = request.form.get(
+            "start_date",
+            ""
+        ).strip()
+
+        end_date = request.form.get(
+            "end_date",
+            ""
+        ).strip()
+
+        uploaded_files = request.files.getlist(
+            "pdf_files"
+        )
+
+        # --------------------------------------------------
+        # VALIDATE PROJECT NAME
+        # --------------------------------------------------
+
+        if not project_name:
+
+            flash(
+                "Please enter a project name."
+            )
+
+            return render_template(
+                "index.html",
+                dashboard_data=None,
+                project_name=project_name,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+        # --------------------------------------------------
+        # VALIDATE DATES
+        # --------------------------------------------------
+
+        try:
+
+            validate_dates(
+                start_date,
+                end_date
+            )
+
+        except ValueError as error:
+
+            flash(str(error))
+
+            return render_template(
+                "index.html",
+                dashboard_data=None,
+                project_name=project_name,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+        # --------------------------------------------------
+        # VALIDATE PDF FILES
+        # --------------------------------------------------
+
+        valid_files = [
+
+            uploaded_file
+
+            for uploaded_file in uploaded_files
+
+            if uploaded_file
+            and uploaded_file.filename
+            and allowed_file(uploaded_file.filename)
+
+        ]
+
+        if not valid_files:
+
+            flash(
+                "Please select at least one valid PDF file."
+            )
+
+            return render_template(
+                "index.html",
+                dashboard_data=None,
+                project_name=project_name,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+        # --------------------------------------------------
+        # PREVENT SIMULTANEOUS SUBMISSIONS
+        # --------------------------------------------------
+
+        if not PROCESSING_LOCK.acquire(False):
+
+            flash(
+                "Another dashboard generation is already "
+                "in progress. Please try again shortly."
+            )
+
+            return render_template(
+                "index.html",
+                dashboard_data=None,
+                project_name=project_name,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+        try:
+
+            # --------------------------------------------------
+            # STEP 1: CLEAR OLD INPUT PDF FILES
+            # --------------------------------------------------
+
+            clear_old_input_pdfs()
+
+            # --------------------------------------------------
+            # STEP 2: SAVE NEW PDF FILES
+            # --------------------------------------------------
+
+            saved_count = save_uploaded_pdfs(
+                valid_files
+            )
+
+            # --------------------------------------------------
+            # STEP 3: RUN BOTH OPERATIONS SIMULTANEOUSLY
+            # --------------------------------------------------
+
+            # Operation A:
+            # Execute main.py and generate output JSON.
+            #
+            # Operation B:
+            # Call API and retrieve subsystem information.
+            #
+            # Both operations run concurrently.
+
+            with ThreadPoolExecutor(
+                max_workers=2
+            ) as executor:
+
+                pdf_future = executor.submit(
+                    run_pdf_converter
+                )
+
+                api_future = executor.submit(
+                    fetch_subsystems_from_api,
+                    project_name
+                )
+
+                # Wait for PDF conversion.
+
+                json_path = pdf_future.result()
+
+                # Wait for API response.
+
+                subsystem_data = api_future.result()
+
+            # --------------------------------------------------
+            # STEP 4: GENERATE NEW SUBSYSTEMS.JSON
+            # --------------------------------------------------
+
+            # This happens only after BOTH operations
+            # have completed successfully.
+
+            save_subsystems_safely(
+                subsystem_data
+            )
+
+            # --------------------------------------------------
+            # STEP 5: GENERATE DASHBOARD
+            # --------------------------------------------------
+
+            # IMPORTANT:
+            # dashboard.py must support these four arguments:
+            #
+            # process_dashboard(
+            #     json_path,
+            #     project_name,
+            #     start_date,
+            #     end_date
+            # )
+
+            dashboard_data = process_dashboard(
+
+                json_path,
+
+                project_name,
+
+                start_date,
+
+                end_date
+
+            )
+
+            # --------------------------------------------------
+            # STEP 6: CHECK FOR DATE-RANGE EXECUTIONS
+            # --------------------------------------------------
+
+            if dashboard_data.get(
+                "no_executions_found",
+                False
+            ):
+
+                flash(
+                    "No procedure executions found for "
+                    "the selected date range."
+                )
+
+                dashboard_data = None
+
+            else:
+
+                flash(
+                    str(saved_count)
+                    + " PDF file(s) processed successfully. "
+                    "Subsystem configuration updated successfully."
+                )
+
+        except Exception as error:
+
+            # No dashboard is generated if PDF processing
+            # or the API request fails.
+
+            dashboard_data = None
+
+            flash(
+                "Error: " + str(error)
+            )
+
+        finally:
+
+            PROCESSING_LOCK.release()
+
+    return render_template(
+
+        "index.html",
+
+        dashboard_data=dashboard_data,
+
+        project_name=project_name,
+
+        start_date=start_date,
+
+        end_date=end_date
+
+    )
+
+
+# --------------------------------------------------
+# 13. RUN APPLICATION
+# --------------------------------------------------
+
+if __name__ == "__main__":
+
+    create_folders()
+
+    print("=" * 50)
+
+    print("SATELLITE TESTING DASHBOARD")
+
+    print("=" * 50)
+
+    print(
+        "Open your browser at http://127.0.0.1:5000"
+    )
+
+    print("Press CTRL+C to stop the server.")
+
+    app.run(
+
+        host="127.0.0.1",
+
+        port=5000,
+
+        debug=False
+
+    )
+
+..............................................................................................
+
+## 2. Important: one dependency
+
+Your application uses the Python `requests` library for the API call.
+
+Install it if it is not already installed:
+
+Bash
+
+```
+pip install requests
+```
+
+You do not need to install anything else specifically for this `app.py`.
+
+## 3. Important changes to your existing files
+
+This `app.py` expects the following changes in the remaining files:
+
+| File              | Required change                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `dashboard.py`    | Accept start date and end date, filter executions, and return a `no_executions_found` flag. |
+| `index.html`      | Add start-date and end-date inputs named `start_date` and `end_date`.                       |
+| `style.css`       | Style the date inputs.                                                                      |
+| `subsystems.json` | No manual changes needed; it will be generated automatically.                               |
+| `main.py`         | No changes planned.                                                                         |
+| `pdf_parser.py`   | No changes planned.                                                                         |
+
+One important point: Do not run this new `app.py` with your old `dashboard.py` yet. Your old `process_dashboard()` accepts only two arguments, whereas this version passes four. We need to update `dashboard.py` next.
+
+Also, the application has not been runtime-tested against your actual API server, so I cannot guarantee the server's response or connectivity.
+
+## 4. What happens when the user clicks Generate Dashboard?
+
+The intended execution will be:
+
+Generate Dashboard clicked
+
+Process A
+
+PDF processing
+
+* Save PDFs
+
+* Run `main.py`
+
+* Generate output JSON
+
+Process B
+
+API processing
+
+* Send project name
+
+* Receive subsystem data
+
+* Validate response
+
+Both successful?
+
+Generate new `subsystems.json`
+
+Compare both JSON files
+
+Generate dashboard using selected dates
+
+If API or PDF processing fails: No dashboard; previous subsystem configuration is preserved.
+
+## 5. Next file
+
+I recommend we proceed with `dashboard.py` now. This is actually the most important file for your date-range requirement because we need to modify the execution-selection and matching logic carefully without disturbing your existing 90% similarity matching.
+
+I'll provide the entire replacement `dashboard.py`, including the date filtering and no-execution handling, rather than asking you to modify individual functions.
+
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Absolutely. Below is the complete replacement for your `dashboard.py`.
+
+I've kept your existing dashboard processing logic and preserved the important behaviour:
+
+* Exact filename matching first.
+
+* 90% similarity matching if exact matching fails.
+
+* Ambiguous matches are not incorrectly assigned.
+
+* The same JSON procedure cannot be assigned to multiple configured procedures.
+
+* Latest execution is selected using `date_time`.
+
+* `mode_executions` is ignored when determining the final status.
+
+* Unassigned procedures are identified separately.
+
+I've also incorporated the date-range filtering requirement.
+
+One important compatibility point: This version expects the updated `app.py` to call `process_dashboard(json_path, project_name, start_date, end_date)`. It also supports the original two-argument call.
+
+## Replace your entire `dashboard.py`
+
+Python
+
+```
+# dashboard.py
+# Dashboard processing logic
+# Compatible with Python 3.6.5
+
+import json
+import os
+import re
+import difflib
+
+from datetime import datetime, date
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SUBSYSTEM_FILE = os.path.join(BASE_DIR, "subsystems.json")
+
+SIMILARITY_THRESHOLD = 0.90
+
+
+# --------------------------------------------------
+# 1. NORMALIZE FILENAMES
+# --------------------------------------------------
+
+def normalize_name(name):
+    """Normalize filenames for comparison."""
+
+    name = os.path.basename(str(name)).strip().lower()
+    name = re.sub(r"\s+", "", name)
+
+    return name
+
+
+# --------------------------------------------------
+# 2. CALCULATE SIMILARITY
+# --------------------------------------------------
+
+def similarity_score(name1, name2):
+
+    first = normalize_name(name1)
+    second = normalize_name(name2)
+
+    return difflib.SequenceMatcher(
+        None, first, second
+    ).ratio()
+
+
+# --------------------------------------------------
+# 3. PARSE DATE AND TIME
+# --------------------------------------------------
+
+def parse_datetime(value):
+    """Parse supported execution date/time formats."""
+
+    if not value:
+        return None
+
+    formats = [
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for date_format in formats:
+
+        try:
+            return datetime.strptime(
+                str(value).strip(),
+                date_format
+            )
+
+        except (ValueError, TypeError):
+            continue
+
+    return None
+
+
+# --------------------------------------------------
+# 4. PARSE USER DATE INPUT
+# --------------------------------------------------
+
+def parse_filter_date(value, field_name):
+
+    if value is None or str(value).strip() == "":
+        return None
+
+    try:
+        return datetime.strptime(
+            str(value).strip(),
+            "%Y-%m-%d"
+        ).date()
+
+    except ValueError:
+
+        raise ValueError(
+            "Invalid " + field_name +
+            ". Please select a valid date."
+        )
+
+
+# --------------------------------------------------
+# 5. LOAD SUBSYSTEM CONFIGURATION
+# --------------------------------------------------
+
+def load_subsystems():
+
+    if not os.path.isfile(SUBSYSTEM_FILE):
+
+        raise RuntimeError(
+            "subsystems.json was not found."
+        )
+
+    with open(SUBSYSTEM_FILE, "r") as file:
+
+        subsystems = json.load(file)
+
+    if not isinstance(subsystems, dict):
+
+        raise ValueError(
+            "subsystems.json must contain a JSON object."
+        )
+
+    if not subsystems:
+
+        raise ValueError(
+            "subsystems.json does not contain any subsystems."
+        )
+
+    for subsystem_name, configured_names in subsystems.items():
+
+        if not isinstance(subsystem_name, str):
+
+            raise ValueError(
+                "Invalid subsystem name in subsystems.json."
+            )
+
+        if not isinstance(configured_names, list):
+
+            raise ValueError(
+                "Invalid procedure list for subsystem: "
+                + subsystem_name
+            )
+
+        for procedure_name in configured_names:
+
+            if not isinstance(procedure_name, str):
+
+                raise ValueError(
+                    "Invalid procedure name in subsystem: "
+                    + subsystem_name
+                )
+
+    return subsystems
+
+
+# --------------------------------------------------
+# 6. FIND BEST PROCEDURE MATCH
+# --------------------------------------------------
+
+def find_best_match(target_name, json_names):
+    """
+    Exact matching is preferred.
+
+    Otherwise, similarity must be at least 90%.
+
+    Equally scoring matches are ambiguous.
+    """
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) == 1:
+
+        return exact_matches[0], "exact"
+
+    if len(exact_matches) > 1:
+
+        return None, "ambiguous"
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+
+        return None, "unmatched"
+
+    scored_matches.sort(
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    highest_score = scored_matches[0][1]
+
+    best_matches = [
+        item for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+    if len(best_matches) != 1:
+
+        return None, "ambiguous"
+
+    return best_matches[0][0], "similar"
+
+
+# --------------------------------------------------
+# 7. GET POSSIBLE AMBIGUOUS MATCHES
+# --------------------------------------------------
+
+def get_ambiguous_candidates(target_name, json_names):
+
+    target = normalize_name(target_name)
+
+    exact_matches = [
+        name for name in json_names
+        if normalize_name(name) == target
+    ]
+
+    if len(exact_matches) > 1:
+
+        return exact_matches
+
+    scored_matches = []
+
+    for name in json_names:
+
+        score = similarity_score(
+            target_name,
+            name
+        )
+
+        if score >= SIMILARITY_THRESHOLD:
+
+            scored_matches.append((name, score))
+
+    if not scored_matches:
+
+        return []
+
+    highest_score = max(
+        item[1] for item in scored_matches
+    )
+
+    return [
+        item[0] for item in scored_matches
+        if abs(item[1] - highest_score) < 0.000001
+    ]
+
+
+# --------------------------------------------------
+# 8. FILTER EXECUTIONS BY DATE
+# --------------------------------------------------
+
+def filter_procedure_executions(
+    procedure_data,
+    start_date=None,
+    end_date=None
+):
+    """
+    Return executions within the selected date range.
+
+    Both start and end dates are inclusive.
+
+    Invalid or missing execution timestamps are excluded
+    when date filtering is enabled.
+    """
+
+    executions = procedure_data.get(
+        "procedures", []
+    )
+
+    if not isinstance(executions, list):
+
+        raise ValueError(
+            "Invalid procedures list in generated JSON."
+        )
+
+    filtered = []
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time", "")
+        )
+
+        if execution_date is None:
+
+            if start_date is None and end_date is None:
+                continue
+
+            continue
+
+        execution_day = execution_date.date()
+
+        if start_date is not None:
+
+            if execution_day < start_date:
+                continue
+
+        if end_date is not None:
+
+            if execution_day > end_date:
+                continue
+
+        filtered.append(
+            (execution_date, execution)
+        )
+
+    return filtered
+
+
+# --------------------------------------------------
+# 9. FIND LATEST EXECUTION
+# --------------------------------------------------
+
+def get_latest_execution(
+    procedure_data,
+    start_date=None,
+    end_date=None
+):
+    """
+    Find the latest execution within the selected date range.
+
+    mode_executions is ignored.
+    """
+
+    valid_executions = filter_procedure_executions(
+        procedure_data,
+        start_date,
+        end_date
+    )
+
+    if not valid_executions:
+
+        return None
+
+    valid_executions.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+    return valid_executions[0][1]
+
+
+# --------------------------------------------------
+# 10. CALCULATE DATE RANGE
+# --------------------------------------------------
+
+def get_date_range(
+    json_procedures,
+    start_date=None,
+    end_date=None
+):
+    """
+    Calculate the actual execution date range
+    within the selected date range.
+    """
+
+    all_dates = []
+
+    for procedure_data in json_procedures.values():
+
+        valid_executions = filter_procedure_executions(
+            procedure_data,
+            start_date,
+            end_date
+        )
+
+        for execution_date, execution in valid_executions:
+
+            all_dates.append(execution_date)
+
+    if not all_dates:
+
+        return "Date range unavailable"
+
+    oldest_date = min(all_dates)
+    latest_date = max(all_dates)
+
+    return (
+        oldest_date.strftime("%d-%m-%Y")
+        + " to "
+        + latest_date.strftime("%d-%m-%Y")
+    )
+
+
+# --------------------------------------------------
+# 11. PROCESS DASHBOARD
+# --------------------------------------------------
+
+def process_dashboard(
+    json_path,
+    project_name="",
+    start_date="",
+    end_date=""
+):
+    """
+    Process generated JSON and prepare dashboard data.
+
+    Supports optional date filtering.
+
+    Returns:
+        project_name
+        date_range
+        subsystems
+        unassigned_procedures
+        no_executions_found
+        selected_start_date
+        selected_end_date
+    """
+
+    # Parse selected dates.
+
+    start_filter = parse_filter_date(
+        start_date,
+        "start date"
+    )
+
+    end_filter = parse_filter_date(
+        end_date,
+        "end date"
+    )
+
+    if (
+        start_filter is not None
+        and end_filter is not None
+        and start_filter > end_filter
+    ):
+
+        raise ValueError(
+            "Start date cannot be later than end date."
+        )
+
+    # Load subsystem configuration.
+
+    subsystems = load_subsystems()
+
+    # Validate generated JSON file.
+
+    if not os.path.isfile(json_path):
+
+        raise RuntimeError(
+            "Generated JSON file was not found."
+        )
+
+    with open(json_path, "r") as json_file:
+
+        json_data = json.load(json_file)
+
+    if not isinstance(json_data, dict):
+
+        raise ValueError(
+            "Generated JSON must contain a JSON object."
+        )
+
+    # Ignore global Insights.
+
+    json_procedures = {
+
+        name: data
+
+        for name, data in json_data.items()
+
+        if name != "Insights"
+        and isinstance(data, dict)
+
+    }
+
+    json_names = list(json_procedures.keys())
+
+    # Calculate selected date range.
+
+    date_range = get_date_range(
+        json_procedures,
+        start_filter,
+        end_filter
+    )
+
+    # Check whether any execution exists in selected dates.
+
+    has_valid_execution = False
+
+    for procedure_data in json_procedures.values():
+
+        executions = filter_procedure_executions(
+            procedure_data,
+            start_filter,
+            end_filter
+        )
+
+        if executions:
+
+            has_valid_execution = True
+            break
+
+    # If no executions exist, return an explicit flag.
+
+    if not has_valid_execution:
+
+        return {
+
+            "project_name": project_name,
+
+            "date_range": date_range,
+
+            "subsystems": [],
+
+            "unassigned_procedures": {
+
+                "success": [],
+                "failure": [],
+
+                "success_count": 0,
+                "failure_count": 0,
+
+                "total": 0
+
+            },
+
+            "no_executions_found": True,
+
+            "selected_start_date": (
+                start_filter.isoformat()
+                if start_filter else ""
+            ),
+
+            "selected_end_date": (
+                end_filter.isoformat()
+                if end_filter else ""
+            )
+
+        }
+
+    results = []
+
+    # Successfully assigned JSON procedures.
+
+    assigned_names = set()
+
+    # JSON procedures involved in ambiguous matching.
+
+    reserved_names = set()
+
+    # --------------------------------------------------
+    # PROCESS EACH SUBSYSTEM
+    # --------------------------------------------------
+
+    for subsystem_name, configured_names in subsystems.items():
+
+        success_names = []
+        failure_names = []
+        unmatched_names = []
+        ambiguous_names = []
+
+        for configured_name in configured_names:
+
+            matched_name, match_type = find_best_match(
+                configured_name,
+                json_names
+            )
+
+            # No unique matching procedure.
+
+            if matched_name is None:
+
+                if match_type == "ambiguous":
+
+                    ambiguous_names.append(
+                        configured_name
+                    )
+
+                    candidates = get_ambiguous_candidates(
+                        configured_name,
+                        json_names
+                    )
+
+                    reserved_names.update(candidates)
+
+                else:
+
+                    unmatched_names.append(
+                        configured_name
+                    )
+
+                continue
+
+            # Prevent duplicate assignment.
+
+            if matched_name in assigned_names:
+
+                ambiguous_names.append(
+                    configured_name
+                )
+
+                reserved_names.add(
+                    matched_name
+                )
+
+                continue
+
+            # Get latest execution within selected dates.
+
+            latest = get_latest_execution(
+                json_procedures[matched_name],
+                start_filter,
+                end_filter
+            )
+
+            # No execution in selected dates.
+
+            if latest is None:
+
+                unmatched_names.append(
+                    configured_name
+                )
+
+                continue
+
+            # Reserve the matched procedure only after
+            # confirming that a valid execution exists.
+
+            assigned_names.add(
+                matched_name
+            )
+
+            # Read latest final status.
+
+            final_status = str(
+                latest.get("final_status", "")
+            ).strip().lower()
+
+            if final_status == "success":
+
+                success_names.append(
+                    configured_name
+                )
+
+            elif final_status == "failure":
+
+                failure_names.append(
+                    configured_name
+                )
+
+            else:
+
+                unmatched_names.append(
+                    configured_name
+                )
+
+        # Calculate subsystem counts.
+
+        success_count = len(success_names)
+        failure_count = len(failure_names)
+
+        total = success_count + failure_count
+
+        success_percentage = (
+            round(
+                success_count * 100.0 / total,
+                2
+            )
+            if total else 0
+        )
+
+        failure_percentage = (
+            round(
+                failure_count * 100.0 / total,
+                2
+            )
+            if total else 0
+        )
+
+        results.append({
+
+            "name": subsystem_name,
+
+            "success": success_names,
+            "failure": failure_names,
+
+            "unmatched": unmatched_names,
+            "ambiguous": ambiguous_names,
+
+            "success_count": success_count,
+            "failure_count": failure_count,
+
+            "unmatched_count": len(unmatched_names),
+            "ambiguous_count": len(ambiguous_names),
+
+            "total": total,
+
+            "success_percentage": success_percentage,
+            "failure_percentage": failure_percentage
+
+        })
+
+    # --------------------------------------------------
+    # 12. IDENTIFY UNASSIGNED PROCEDURES
+    # --------------------------------------------------
+
+    unassigned_success = []
+    unassigned_failure = []
+
+    for procedure_name, procedure_data in json_procedures.items():
+
+        # Skip already assigned or ambiguous candidates.
+
+        if procedure_name in assigned_names:
+            continue
+
+        if procedure_name in reserved_names:
+            continue
+
+        # Get latest execution within selected dates.
+
+        latest = get_latest_execution(
+            procedure_data,
+            start_filter,
+            end_filter
+        )
+
+        if latest is None:
+            continue
+
+        final_status = str(
+            latest.get("final_status", "")
+        ).strip().lower()
+
+        if final_status == "success":
+
+            unassigned_success.append(
+                procedure_name
+            )
+
+        elif final_status == "failure":
+
+            unassigned_failure.append(
+                procedure_name
+            )
+
+    # --------------------------------------------------
+    # 13. RETURN FINAL DASHBOARD DATA
+    # --------------------------------------------------
+
+    unassigned_procedures = {
+
+        "success": unassigned_success,
+
+        "failure": unassigned_failure,
+
+        "success_count": len(unassigned_success),
+
+        "failure_count": len(unassigned_failure),
+
+        "total": (
+            len(unassigned_success)
+            + len(unassigned_failure)
+        )
+
+    }
+
+    return {
+
+        "project_name": project_name,
+
+        "date_range": date_range,
+
+        "subsystems": results,
+
+        "unassigned_procedures": unassigned_procedures,
+
+        "no_executions_found": False,
+
+        "selected_start_date": (
+            start_filter.isoformat()
+            if start_filter else ""
+        ),
+
+        "selected_end_date": (
+            end_filter.isoformat()
+            if end_filter else ""
+        )
+
+    }
+```
+
+## What this version does differently
+
+### 1. Date filtering
+
+For example, suppose a procedure has these executions:
+
+| Execution date | Status  |
+| -------------- | ------- |
+| 01-01-2026     | Success |
+| 10-02-2026     | Failure |
+| 15-03-2026     | Success |
+
+If the user selects 01-02-2026 to 28-02-2026, only the February execution is considered.
+
+The latest execution within the selected period determines the displayed status.
+
+### 2. No executions in the selected period
+
+If there are no valid executions in the selected date range, the function returns:
+
+Python
+
+```
+"no_executions_found": True
+```
+
+This allows the Flask application and HTML template to display an appropriate message instead of presenting misleading subsystem statistics.
+
+### 3. Important correction to the matching logic
+
+A procedure is now added to `assigned_names` only after an execution is found within the selected date range.
+
+This prevents a procedure with no execution in the selected period from being incorrectly hidden from the unassigned-procedure calculation.
+
+## Next file: `index.html`
+
+There is one important remaining integration step.
+
+Your existing `index.html` does not yet handle `no_executions_found`. If we leave it unchanged, it could attempt to display an empty dashboard.
+
+We need to update it to:
+
+* Add the date selection fields.
+
+* Display the no-executions message.
+
+* Display the dashboard only when valid execution data exists.
+
+* Preserve the existing Chart.js graph and subsystem cards.
+
+Do not replace any other files yet. The next file should be the complete updated `templates/index.html`, followed by the CSS and a final integration check of `app.py` and the API configuration.
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Now let's update your `templates/index.html` completely.
+
+This version preserves your existing dashboard design and Chart.js functionality while incorporating the date-range selection and the new `dashboard.py` response structure.
+
+## What this updated HTML includes
+
+1. Project name input.
+
+2. Multiple PDF upload.
+
+3. Start date and end date selection.
+
+4. Dashboard displayed only when valid execution data exists.
+
+5. Clear message when no executions are found.
+
+6. Dynamic subsystem cards using names from `subsystems.json`.
+
+7. Success, Failure, Unmatched and Ambiguous procedure details.
+
+8. Unassigned procedures.
+
+9. Interactive stacked bar chart with procedure names in tooltips.
+
+10. Responsive layout for smaller screens.
+
+## Replace your entire `templates/index.html`
+
+HTML
+
+```
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title>Satellite Testing Dashboard</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
+
+    <script src="{{ url_for('static', filename='chart.min.js') }}"></script>
+
+</head>
+
+
+<body>
+
+<div class="page-container">
+
+    <!-- HEADER -->
+
+    <header class="header">
+
+        <div>
+
+            <h1>Satellite Testing Dashboard</h1>
+
+            <p>
+                Subsystem-wise testing status and analysis
+            </p>
+
+        </div>
+
+    </header>
+
+
+    <main>
+
+        <!-- ====================================== -->
+        <!-- PDF UPLOAD SECTION                     -->
+        <!-- ====================================== -->
+
+        <section class="upload-section">
+
+            <h2>Upload Test Reports</h2>
+
+            <p>
+                Enter the project name, select the execution
+                date range and upload PDF reports to generate
+                the subsystem testing dashboard.
+            </p>
+
+
+            <form method="POST"
+                  action="/"
+                  enctype="multipart/form-data">
+
+
+                <!-- PROJECT NAME -->
+
+                <div class="project-name-field">
+
+                    <label for="project_name">
+                        Project Name
+                    </label>
+
+                    <input type="text"
+                           id="project_name"
+                           name="project_name"
+                           placeholder="Enter project name"
+                           value="{{ project_name or '' }}"
+                           required>
+
+                </div>
+
+
+                <!-- DATE FILTER -->
+
+                <div class="date-filter-section">
+
+                    <h3>Execution Date Range</h3>
+
+                    <p>
+                        Select the period for which you want
+                        to analyse procedure executions.
+                    </p>
+
+
+                    <div class="date-filter-grid">
+
+
+                        <div class="date-field">
+
+                            <label for="start_date">
+                                Start Date
+                            </label>
+
+                            <input type="date"
+                                   id="start_date"
+                                   name="start_date"
+                                   value="{{ request.form.get('start_date', '') }}"
+                                   max="9999-12-31">
+
+                        </div>
+
+
+                        <div class="date-field">
+
+                            <label for="end_date">
+                                End Date
+                            </label>
+
+                            <input type="date"
+                                   id="end_date"
+                                   name="end_date"
+                                   value="{{ request.form.get('end_date', '') }}"
+                                   max="9999-12-31">
+
+                        </div>
+
+
+                    </div>
+
+                    <p class="date-help">
+                        Both dates are inclusive. Leave both
+                        fields empty to analyse all available
+                        execution dates.
+                    </p>
+
+                </div>
+
+
+                <!-- PDF UPLOAD -->
+
+                <div class="upload-box">
+
+                    <input type="file"
+                           id="pdf_files"
+                           name="pdf_files"
+                           accept=".pdf,application/pdf"
+                           multiple
+                           required>
+
+                    <label for="pdf_files">
+                        Select PDF Files
+                    </label>
+
+                    <p id="file-names">
+                        No files selected
+                    </p>
+
+                </div>
+
+
+                <!-- SUBMIT BUTTON -->
+
+                <button type="submit"
+                        class="upload-button"
+                        id="upload-button">
+
+                    Upload and Generate Dashboard
+
+                </button>
+
+
+            </form>
+
+
+            <!-- ================================== -->
+            <!-- FLASH MESSAGES                     -->
+            <!-- ================================== -->
+
+            {% with messages = get_flashed_messages() %}
+
+                {% if messages %}
+
+                    <div class="messages">
+
+                        {% for message in messages %}
+
+                            <p>{{ message }}</p>
+
+                        {% endfor %}
+
+                    </div>
+
+                {% endif %}
+
+            {% endwith %}
+
+
+        </section>
+
+
+
+        <!-- ====================================== -->
+        <!-- DASHBOARD SECTION                     -->
+        <!-- ====================================== -->
+
+        {% if dashboard_data is not none %}
+
+
+            <!-- ================================== -->
+            <!-- NO EXECUTIONS FOUND                -->
+            <!-- ================================== -->
+
+            {% if dashboard_data.no_executions_found %}
+
+
+                <section class="no-data-section">
+
+                    <div class="no-data-content">
+
+                        <h2>No Executions Found</h2>
+
+                        <p>
+                            No valid procedure executions were
+                            found for the selected date range.
+                        </p>
+
+                        <p>
+                            Please select another date range
+                            and upload the reports again.
+                        </p>
+
+                        <div class="selected-date-info">
+
+                            <strong>Selected Date Range</strong>
+
+                            <p>
+
+                                {{ dashboard_data.selected_start_date
+                                   if dashboard_data.selected_start_date
+                                   else 'Not specified' }}
+
+                                to
+
+                                {{ dashboard_data.selected_end_date
+                                   if dashboard_data.selected_end_date
+                                   else 'Not specified' }}
+
+                            </p>
+
+                        </div>
+
+                    </div>
+
+                </section>
+
+
+            {% else %}
+
+
+                <!-- ================================== -->
+                <!-- ACTUAL DASHBOARD                  -->
+                <!-- ================================== -->
+
+                <section class="dashboard-section">
+
+
+                    <!-- PROJECT HEADING AND DATE -->
+
+                    <div class="project-heading">
+
+
+                        <div class="project-title">
+
+                            <h2>
+
+                                {{ dashboard_data.project_name }}
+
+                                Project Overview
+
+                            </h2>
+
+                            <p>
+                                Latest execution status for each
+                                configured procedure within the
+                                selected date range.
+                            </p>
+
+                        </div>
+
+
+                        <div class="project-date">
+
+                            <span>Execution Date Range:</span>
+
+                            <strong>
+                                {{ dashboard_data.date_range }}
+                            </strong>
+
+                        </div>
+
+
+                    </div>
+
+
+
+                    <!-- ================================== -->
+                    <!-- SUBSYSTEM GRAPH                   -->
+                    <!-- ================================== -->
+
+                    <div class="section-heading">
+
+                        <h2>Subsystem Testing Overview</h2>
+
+                    </div>
+
+
+                    <!-- LEGEND -->
+
+                    <div class="legend">
+
+                        <span>
+
+                            <span class="legend-color success-color"></span>
+
+                            Success
+
+                        </span>
+
+
+                        <span>
+
+                            <span class="legend-color failure-color"></span>
+
+                            Failure
+
+                        </span>
+
+                    </div>
+
+
+                    <!-- CHART -->
+
+                    <div class="chart-container">
+
+                        <canvas id="subsystemChart"></canvas>
+
+                    </div>
+
+
+
+                    <!-- ================================== -->
+                    <!-- SUBSYSTEM DETAILS                 -->
+                    <!-- ================================== -->
+
+                    <h2 class="details-heading">
+
+                        Subsystem Details
+
+                    </h2>
+
+
+                    <div class="subsystem-grid">
+
+
+                        {% for subsystem in dashboard_data.subsystems %}
+
+
+                            <div class="subsystem-card">
+
+
+                                <h3>
+                                    {{ subsystem.name }}
+                                </h3>
+
+
+                                <!-- SUCCESS COUNT -->
+
+                                <div class="status-row">
+
+                                    <span class="success-text">
+                                        Success
+                                    </span>
+
+                                    <strong>
+                                        {{ subsystem.success_count }}
+                                    </strong>
+
+                                </div>
+
+
+                                <!-- FAILURE COUNT -->
+
+                                <div class="status-row">
+
+                                    <span class="failure-text">
+                                        Failure
+                                    </span>
+
+                                    <strong>
+                                        {{ subsystem.failure_count }}
+                                    </strong>
+
+                                </div>
+
+
+                                <!-- UNMATCHED COUNT -->
+
+                                <div class="status-row">
+
+                                    <span>
+                                        Unmatched
+                                    </span>
+
+                                    <strong>
+                                        {{ subsystem.unmatched_count }}
+                                    </strong>
+
+                                </div>
+
+
+                                <!-- AMBIGUOUS COUNT -->
+
+                                <div class="status-row">
+
+                                    <span>
+                                        Ambiguous
+                                    </span>
+
+                                    <strong>
+                                        {{ subsystem.ambiguous_count }}
+                                    </strong>
+
+                                </div>
+
+
+                                <!-- PROCEDURE NAMES -->
+
+                                <details>
+
+                                    <summary>
+                                        View procedure names
+                                    </summary>
+
+
+                                    <!-- SUCCESS -->
+
+                                    <h4>
+                                        Successful procedures
+                                    </h4>
+
+                                    <ul>
+
+                                        {% for name in subsystem.success %}
+
+                                            <li>{{ name }}</li>
+
+                                        {% else %}
+
+                                            <li>None</li>
+
+                                        {% endfor %}
+
+                                    </ul>
+
+
+                                    <!-- FAILURE -->
+
+                                    <h4>
+                                        Failed procedures
+                                    </h4>
+
+                                    <ul>
+
+                                        {% for name in subsystem.failure %}
+
+                                            <li>{{ name }}</li>
+
+                                        {% else %}
+
+                                            <li>None</li>
+
+                                        {% endfor %}
+
+                                    </ul>
+
+
+                                    <!-- UNMATCHED -->
+
+                                    <h4>
+                                        Unmatched procedures
+                                    </h4>
+
+                                    <ul>
+
+                                        {% for name in subsystem.unmatched %}
+
+                                            <li>{{ name }}</li>
+
+                                        {% else %}
+
+                                            <li>None</li>
+
+                                        {% endfor %}
+
+                                    </ul>
+
+
+                                    <!-- AMBIGUOUS -->
+
+                                    <h4>
+                                        Ambiguous procedures
+                                    </h4>
+
+                                    <ul>
+
+                                        {% for name in subsystem.ambiguous %}
+
+                                            <li>{{ name }}</li>
+
+                                        {% else %}
+
+                                            <li>None</li>
+
+                                        {% endfor %}
+
+                                    </ul>
+
+
+                                </details>
+
+
+                            </div>
+
+
+                        {% else %}
+
+
+                            <p>
+                                No subsystem information is available.
+                            </p>
+
+
+                        {% endfor %}
+
+
+                    </div>
+
+
+
+                    <!-- ================================== -->
+                    <!-- UNASSIGNED PROCEDURES             -->
+                    <!-- ================================== -->
+
+                    <h2 class="details-heading">
+
+                        Other Procedures
+
+                    </h2>
+
+
+                    <div class="unassigned-grid">
+
+
+                        <div class="unassigned-card">
+
+
+                            <h3>
+                                Unassigned Procedures
+                            </h3>
+
+
+                            <!-- SUCCESS -->
+
+                            <div class="status-row">
+
+                                <span class="success-text">
+                                    Success
+                                </span>
+
+                                <strong class="success-text">
+
+                                    {{ dashboard_data.unassigned_procedures.success_count }}
+
+                                </strong>
+
+                            </div>
+
+
+                            <!-- FAILURE -->
+
+                            <div class="status-row">
+
+                                <span class="failure-text">
+                                    Failure
+                                </span>
+
+                                <strong class="failure-text">
+
+                                    {{ dashboard_data.unassigned_procedures.failure_count }}
+
+                                </strong>
+
+                            </div>
+
+
+                            <!-- VIEW PROCEDURE NAMES -->
+
+                            <details>
+
+
+                                <summary>
+                                    View procedure names
+                                </summary>
+
+
+                                <!-- SUCCESS -->
+
+                                <h4>
+                                    Successful procedures
+                                </h4>
+
+                                <ul>
+
+                                    {% for name in dashboard_data.unassigned_procedures.success %}
+
+                                        <li>{{ name }}</li>
+
+                                    {% else %}
+
+                                        <li>None</li>
+
+                                    {% endfor %}
+
+                                </ul>
+
+
+                                <!-- FAILURE -->
+
+                                <h4>
+                                    Failed procedures
+                                </h4>
+
+                                <ul>
+
+                                    {% for name in dashboard_data.unassigned_procedures.failure %}
+
+                                        <li>{{ name }}</li>
+
+                                    {% else %}
+
+                                        <li>None</li>
+
+                                    {% endfor %}
+
+                                </ul>
+
+
+                            </details>
+
+
+                        </div>
+
+
+                    </div>
+
+
+                </section>
+
+
+            {% endif %}
+
+
+        {% endif %}
+
+
+    </main>
+
+
+
+    <!-- FOOTER -->
+
+    <footer>
+
+        Satellite Testing Dashboard
+
+    </footer>
+
+
+</div>
+
+
+
+<!-- ============================================== -->
+<!-- CHART GENERATION                               -->
+<!-- ============================================== -->
+
+{% if dashboard_data is not none and not dashboard_data.no_executions_found %}
+
+
+<script>
+
+    const dashboardData =
+        {{ dashboard_data.subsystems | tojson }};
+
+
+    // ----------------------------------------------
+    // CHART LABELS
+    // ----------------------------------------------
+
+    const labels = dashboardData.map(
+
+        item => item.name
+
+    );
+
+
+    // ----------------------------------------------
+    // SUCCESS AND FAILURE COUNTS
+    // ----------------------------------------------
+
+    const successCounts = dashboardData.map(
+
+        item => item.success_count
+
+    );
+
+
+    const failureCounts = dashboardData.map(
+
+        item => item.failure_count
+
+    );
+
+
+    // ----------------------------------------------
+    // PROCEDURE NAMES
+    // ----------------------------------------------
+
+    const successNames = dashboardData.map(
+
+        item => item.success
+
+    );
+
+
+    const failureNames = dashboardData.map(
+
+        item => item.failure
+
+    );
+
+
+    // ----------------------------------------------
+    // GET CHART CONTEXT
+    // ----------------------------------------------
+
+    const chartCanvas = document.getElementById(
+        'subsystemChart'
+    );
+
+
+    if (chartCanvas && typeof Chart !== 'undefined') {
+
+
+        const ctx = chartCanvas.getContext('2d');
+
+
+        new Chart(ctx, {
+
+
+            type: 'bar',
+
+
+            data: {
+
+
+                labels: labels,
+
+
+                datasets: [
+
+
+                    {
+
+                        label: 'Success',
+
+                        data: successCounts,
+
+                        backgroundColor: '#269B59',
+
+                        successNames: successNames
+
+                    },
+
+
+                    {
+
+                        label: 'Failure',
+
+                        data: failureCounts,
+
+                        backgroundColor: '#D94B4B',
+
+                        failureNames: failureNames
+
+                    }
+
+
+                ]
+
+
+            },
+
+
+            options: {
+
+
+                responsive: true,
+
+                maintainAspectRatio: false,
+
+
+                interaction: {
+
+                    intersect: false,
+
+                    mode: 'index'
+
+                },
+
+
+                scales: {
+
+
+                    x: {
+
+                        stacked: true,
+
+                        title: {
+
+                            display: true,
+
+                            text: 'Subsystems'
+
+                        }
+
+                    },
+
+
+                    y: {
+
+                        stacked: true,
+
+                        beginAtZero: true,
+
+                        ticks: {
+
+                            precision: 0
+
+                        },
+
+                        title: {
+
+                            display: true,
+
+                            text: 'Number of Procedures'
+
+                        }
+
+                    }
+
+
+                },
+
+
+                plugins: {
+
+
+                    legend: {
+
+                        position: 'top'
+
+                    },
+
+
+                    tooltip: {
+
+
+                        callbacks: {
+
+
+                            label: function(context) {
+
+
+                                const dataset = context.dataset;
+
+                                const count = context.raw;
+
+                                let names = [];
+
+
+                                if (dataset.label === 'Success') {
+
+                                    names = dataset.successNames[
+                                        context.dataIndex
+                                    ];
+
+                                }
+
+
+                                if (dataset.label === 'Failure') {
+
+                                    names = dataset.failureNames[
+                                        context.dataIndex
+                                    ];
+
+                                }
+
+
+                                let result = [
+
+                                    dataset.label + ': ' + count
+
+                                ];
+
+
+                                names.forEach(function(name) {
+
+                                    result.push('  ' + name);
+
+                                });
+
+
+                                return result;
+
+
+                            }
+
+
+                        }
+
+
+                    }
+
+
+                }
+
+
+            }
+
+
+        });
+
+
+    }
+
+
+</script>
+
+
+{% endif %}
+
+
+
+<!-- ============================================== -->
+<!-- FILE SELECTION DISPLAY                         -->
+<!-- ============================================== -->
+
+<script>
+
+
+    const pdfInput = document.getElementById(
+        'pdf_files'
+    );
+
+
+    const fileDisplay = document.getElementById(
+        'file-names'
+    );
+
+
+    if (pdfInput && fileDisplay) {
+
+
+        pdfInput.addEventListener(
+
+            'change',
+
+            function() {
+
+
+                const files = this.files;
+
+
+                if (files.length === 0) {
+
+                    fileDisplay.textContent =
+                        'No files selected';
+
+                    return;
+
+                }
+
+
+                fileDisplay.textContent =
+                    files.length + ' PDF file(s) selected';
+
+
+            }
+
+        );
+
+
+    }
+
+
+
+</script>
+
+
+
+<!-- ============================================== -->
+<!-- DATE VALIDATION                                -->
+<!-- ============================================== -->
+
+<script>
+
+
+    const startDateInput = document.getElementById(
+        'start_date'
+    );
+
+
+    const endDateInput = document.getElementById(
+        'end_date'
+    );
+
+
+    if (startDateInput && endDateInput) {
+
+
+        function updateDateLimits() {
+
+
+            if (startDateInput.value) {
+
+                endDateInput.min = startDateInput.value;
+
+            } else {
+
+                endDateInput.removeAttribute('min');
+
+            }
+
+
+            if (endDateInput.value) {
+
+                startDateInput.max = endDateInput.value;
+
+            } else {
+
+                startDateInput.max = '9999-12-31';
+
+            }
+
+
+        }
+
+
+        startDateInput.addEventListener(
+            'change',
+            updateDateLimits
+        );
+
+
+        endDateInput.addEventListener(
+            'change',
+            updateDateLimits
+        );
+
+
+        updateDateLimits();
+
+
+    }
+
+
+</script>
+
+
+
+</body>
+
+</html>
+```
+
+## Important: Two things to understand
+
+1. Dynamic subsystem names
+
+Your HTML does not contain hardcoded subsystem names such as Power, Thermal, or Communication.
+
+It uses:
+
+HTML
+
+```
+{% for subsystem in dashboard_data.subsystems %}
+    <h3>{{ subsystem.name }}</h3>
+{% endfor %}
+```
+
+Therefore, whatever subsystem names are returned by your API and saved into `subsystems.json` will automatically appear on the webpage.
+
+2. API error handling
+
+This HTML does not generate a dashboard by itself. It displays the dashboard data supplied by Flask.
+
+The API failure handling must be implemented in `app.py`. Your previous requirement remains important:
+
+* Do not generate a dashboard after an API failure.
+
+* Do not overwrite the previous valid `subsystems.json`.
+
+* Display a clear API error.
+
+* Allow another upload attempt.
+
+## Files remaining
+
+| File              | Status                                |
+| ----------------- | ------------------------------------- |
+| `app.py`          | Needs final API integration           |
+| `dashboard.py`    | Updated                               |
+| `index.html`      | Updated                               |
+| `style.css`       | Needs date-filter and message styling |
+| `main.py`         | Keep existing                         |
+| `pdf_parser.py`   | Keep existing                         |
+| `subsystems.json` | Generated through API                 |
+
+Next, let's update `static/style.css` completely. I'll preserve your existing appearance and add the styling needed for the date selectors, no-execution message, and responsive layout.
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+Below is the complete, updated `static/style.css` file for your Satellite Testing Dashboard.
+
+It is designed to work with the updated `app.py`, `dashboard.py`, and `index.html` we have been preparing, while preserving your existing dashboard functionality and layout.
+
+### `static/style.css` — Complete new file
+
+Replace your entire existing `static/style.css` with this:
+
+CSS
+
+```
+/* ==================================================
+   SATELLITE TESTING DASHBOARD
+   Main Stylesheet
+   Compatible with the updated Flask dashboard
+================================================== */
+
+
+/* --------------------------------------------------
+   1. GLOBAL STYLES
+-------------------------------------------------- */
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+    color: #252525;
+    font-family: Arial, Helvetica, sans-serif;
+    line-height: 1.5;
+}
+
+.page-container {
+    width: 92%;
+    max-width: 1250px;
+    margin: 0 auto;
+}
+
+
+/* --------------------------------------------------
+   2. HEADER
+-------------------------------------------------- */
+
+.header {
+    padding: 28px 0;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.header h1 {
+    margin: 0;
+    font-size: 28px;
+    font-weight: 700;
+    color: #222222;
+}
+
+.header p {
+    margin: 8px 0 0;
+    color: #777777;
+    font-size: 14px;
+}
+
+
+/* --------------------------------------------------
+   3. UPLOAD SECTION
+-------------------------------------------------- */
+
+.upload-section {
+    margin-top: 30px;
+    padding: 25px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.upload-section h2,
+.section-heading h2 {
+    margin-top: 0;
+    color: #252525;
+}
+
+.upload-section > p {
+    color: #666666;
+    font-size: 14px;
+}
+
+
+/* --------------------------------------------------
+   4. PROJECT NAME INPUT
+-------------------------------------------------- */
+
+.project-name-field {
+    margin-top: 20px;
+    margin-bottom: 20px;
+}
+
+.project-name-field label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.project-name-field input {
+    width: 100%;
+    max-width: 450px;
+    padding: 12px;
+    border: 1px solid #cccccc;
+    border-radius: 5px;
+    font-size: 15px;
+    transition: border-color 0.2s ease;
+}
+
+.project-name-field input:focus {
+    outline: none;
+    border-color: #2867b2;
+    box-shadow: 0 0 0 2px rgba(40, 103, 178, 0.12);
+}
+
+
+/* --------------------------------------------------
+   5. PDF UPLOAD BOX
+-------------------------------------------------- */
+
+.upload-box {
+    padding: 25px;
+    margin-top: 20px;
+    text-align: center;
+    border: 2px dashed #cccccc;
+    border-radius: 8px;
+    background: #fafafa;
+    transition: border-color 0.2s ease,
+                background 0.2s ease;
+}
+
+.upload-box:hover {
+    border-color: #2867b2;
+    background: #f5f8fc;
+}
+
+.upload-box input {
+    display: block;
+    margin: 0 auto 15px;
+    max-width: 100%;
+}
+
+.upload-box label {
+    display: inline-block;
+    padding: 10px 22px;
+    background: #eeeeee;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.upload-box label:hover {
+    background: #e0e0e0;
+}
+
+#file-names {
+    margin-bottom: 0;
+    color: #777777;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+
+/* --------------------------------------------------
+   6. UPLOAD BUTTON
+-------------------------------------------------- */
+
+.upload-button {
+    display: inline-block;
+    margin-top: 20px;
+    padding: 12px 24px;
+    border: none;
+    border-radius: 5px;
+    background: #2867b2;
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s ease,
+                transform 0.2s ease;
+}
+
+.upload-button:hover {
+    background: #174e91;
+}
+
+.upload-button:active {
+    transform: scale(0.98);
+}
+
+.upload-button:focus-visible {
+    outline: 3px solid rgba(40, 103, 178, 0.3);
+    outline-offset: 3px;
+}
+
+
+/* --------------------------------------------------
+   7. FLASH MESSAGES
+-------------------------------------------------- */
+
+.messages {
+    margin-top: 18px;
+    padding: 12px 15px;
+    border: 1px solid #dce5ef;
+    border-radius: 5px;
+    background: #f0f5fa;
+    overflow-wrap: anywhere;
+}
+
+.messages p {
+    margin: 5px 0;
+    color: #34495e;
+    font-size: 14px;
+}
+
+.messages p:last-child {
+    margin-bottom: 0;
+}
+
+
+/* --------------------------------------------------
+   8. DASHBOARD SECTION
+-------------------------------------------------- */
+
+.dashboard-section {
+    margin-top: 40px;
+    margin-bottom: 30px;
+}
+
+.section-heading p {
+    color: #777777;
+}
+
+
+/* --------------------------------------------------
+   9. PROJECT HEADING AND DATE
+-------------------------------------------------- */
+
+.project-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    margin-bottom: 35px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #e5e5e5;
+}
+
+.project-title {
+    min-width: 0;
+}
+
+.project-title h2 {
+    margin-top: 0;
+    margin-bottom: 8px;
+    font-size: 25px;
+    overflow-wrap: anywhere;
+}
+
+.project-title p {
+    margin-bottom: 0;
+    color: #777777;
+    font-size: 14px;
+}
+
+.project-date {
+    text-align: right;
+    padding-top: 5px;
+    min-width: 200px;
+}
+
+.project-date span {
+    display: block;
+    margin-bottom: 6px;
+    color: #777777;
+    font-size: 13px;
+}
+
+.project-date strong {
+    color: #333333;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+
+/* --------------------------------------------------
+   10. SECTION HEADINGS
+-------------------------------------------------- */
+
+.section-heading {
+    margin-top: 30px;
+    margin-bottom: 15px;
+}
+
+.section-heading h2 {
+    margin-bottom: 10px;
+}
+
+.details-heading {
+    margin-top: 40px;
+    margin-bottom: 20px;
+    font-size: 22px;
+}
+
+
+/* --------------------------------------------------
+   11. CHART LEGEND
+-------------------------------------------------- */
+
+.legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 25px;
+    margin: 20px 0;
+}
+
+.legend > span {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 14px;
+}
+
+.legend-color {
+    width: 13px;
+    height: 13px;
+    display: inline-block;
+    border-radius: 3px;
+}
+
+.success-color {
+    background: #269B59;
+}
+
+.failure-color {
+    background: #D94B4B;
+}
+
+
+/* --------------------------------------------------
+   12. CHART CONTAINER
+-------------------------------------------------- */
+
+.chart-container {
+    position: relative;
+    width: 100%;
+    height: 430px;
+    padding: 20px;
+    border: 1px solid #eeeeee;
+    border-radius: 8px;
+    background: #ffffff;
+}
+
+.chart-container canvas {
+    max-width: 100%;
+}
+
+
+/* --------------------------------------------------
+   13. SUBSYSTEM GRID
+-------------------------------------------------- */
+
+.subsystem-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+}
+
+.subsystem-card {
+    min-width: 0;
+    padding: 20px;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    background: #ffffff;
+    transition: box-shadow 0.2s ease,
+                border-color 0.2s ease;
+}
+
+.subsystem-card:hover {
+    border-color: #d2dce8;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.04);
+}
+
+.subsystem-card h3 {
+    margin-top: 0;
+    margin-bottom: 15px;
+    font-size: 18px;
+    overflow-wrap: anywhere;
+}
+
+
+/* --------------------------------------------------
+   14. STATUS ROWS
+-------------------------------------------------- */
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 0;
+    border-bottom: 1px solid #eeeeee;
+    font-size: 14px;
+}
+
+.status-row strong {
+    font-size: 15px;
+}
+
+.status-row:last-of-type {
+    border-bottom: none;
+}
+
+.success-text {
+    color: #269B59;
+}
+
+.failure-text {
+    color: #D94B4B;
+}
+
+
+/* --------------------------------------------------
+   15. PROCEDURE DETAILS
+-------------------------------------------------- */
+
+details {
+    margin-top: 15px;
+}
+
+summary {
+    cursor: pointer;
+    color: #2867b2;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+summary:hover {
+    color: #174e91;
+}
+
+details h4 {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    font-size: 14px;
+    color: #444444;
+}
+
+details ul {
+    padding-left: 22px;
+    margin-top: 8px;
+}
+
+details li {
+    margin-bottom: 6px;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+
+/* --------------------------------------------------
+   16. UNASSIGNED PROCEDURES
+-------------------------------------------------- */
+
+.unassigned-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 20px;
+}
+
+.unassigned-card {
+    min-width: 0;
+    padding: 20px;
+    border: 1px solid #dce3ed;
+    border-radius: 8px;
+    background: #f5f7fa;
+}
+
+.unassigned-card h3 {
+    margin-top: 0;
+    margin-bottom: 20px;
+    color: #303d50;
+    font-size: 18px;
+}
+
+.unassigned-card .status-row {
+    border-bottom: 1px solid #e0e5ec;
+}
+
+.unassigned-card details {
+    margin-top: 18px;
+}
+
+.unassigned-card summary {
+    font-weight: 600;
+}
+
+.unassigned-card h4 {
+    margin-top: 20px;
+    margin-bottom: 10px;
+    color: #444444;
+}
+
+
+/* --------------------------------------------------
+   17. FOOTER
+-------------------------------------------------- */
+
+footer {
+    margin-top: 50px;
+    padding: 20px 0;
+    border-top: 1px solid #eeeeee;
+    text-align: center;
+    color: #888888;
+    font-size: 13px;
+}
+
+
+/* --------------------------------------------------
+   18. RESPONSIVE DESIGN
+-------------------------------------------------- */
+
+@media (max-width: 900px) {
+
+    .page-container {
+        width: 94%;
+    }
+
+    .subsystem-grid,
+    .unassigned-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .chart-container {
+        height: 380px;
+    }
+
+}
+
+
+@media (max-width: 700px) {
+
+    .page-container {
+        width: 94%;
+    }
+
+    .header {
+        padding: 22px 0;
+    }
+
+    .header h1 {
+        font-size: 23px;
+    }
+
+    .upload-section {
+        padding: 18px;
+    }
+
+    .subsystem-grid,
+    .unassigned-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .chart-container {
+        height: 350px;
+        padding: 12px;
+    }
+
+    .project-heading {
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .project-date {
+        text-align: left;
+        padding-top: 0;
+        min-width: 0;
+    }
+
+    .project-date strong {
+        white-space: normal;
+    }
+
+    .project-title h2 {
+        font-size: 22px;
+    }
+
+    .project-name-field input {
+        max-width: 100%;
+    }
+
+    .upload-button {
+        width: 100%;
+    }
+
+}
+
+
+@media (max-width: 400px) {
+
+    .header h1 {
+        font-size: 21px;
+    }
+
+    .upload-section {
+        padding: 15px;
+    }
+
+    .subsystem-card,
+    .unassigned-card {
+        padding: 15px;
+    }
+
+    .details-heading {
+        font-size: 20px;
+    }
+
+    .chart-container {
+        height: 300px;
+    }
+
+}
+
+
+/* --------------------------------------------------
+   19. ACCESSIBILITY
+-------------------------------------------------- */
+
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+    outline: 2px solid #2867b2;
+    outline-offset: 3px;
+}
+```
+
+### What this stylesheet covers
+
+* Responsive subsystem cards.
+
+* Success, failure, unmatched and ambiguous procedure details.
+
+* Subsystem bar-chart layout.
+
+* Unassigned procedures section.
+
+* PDF upload and project-name input.
+
+* Flash messages for API and processing errors.
+
+* Mobile and desktop layouts.
+
+* Long subsystem names and procedure filenames without breaking the layout.
+
+### Important
+
+This CSS does not implement API handling or prevent dashboard generation after an API failure. Those protections must be implemented in `app.py` and `dashboard.py`.
+
+Also, the CSS assumes the class names in the supplied `index.html` remain unchanged. If the updated HTML introduces additional classes, those may need corresponding styles.
+
+Next: We should update `main.py` and `pdf_parser.py` only if the agreed changes require them. I would also want to review the final versions of `app.py`, `dashboard.py`, and `index.html` together before calling the complete application ready, especially because you cannot test it right now.
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+Now follow these steps in order. Since you cannot test the application right now, let's make sure we don't accidentally lose any working code.
+
+## Step 1: Replace the files
+
+Inside your existing `visualisation` folder, replace the following files with the new versions we have prepared:
+
+| File                   | Action                       |
+| ---------------------- | ---------------------------- |
+| `app.py`               | Replace with the new version |
+| `dashboard.py`         | Replace with the new version |
+| `templates/index.html` | Replace with the new version |
+| `static/style.css`     | Replace with the new version |
+
+Do not change the filenames or folder structure.
+
+## Step 2: Keep these files unchanged for now
+
+The following files should remain as they are:
+
+* `main.py`
+
+* `pdf_parser.py`
+
+* `subsystems.json`
+
+* `static/chart.min.js`
+
+Also, don't delete anything inside `input/` or `output/` manually.
+
+## Step 3: Check your API configuration
+
+Make sure the actual API IP address is entered in the appropriate configuration location.
+
+If you see a dummy IP address in the code, replace only that dummy value with your real API IP.
+
+Do not change other API settings unless necessary.
+
+## Step 4: Understand what should happen
+
+The expected application workflow is:
+
+1. Upload PDF reports
+
+2. Call the subsystem API
+
+3. Extract subsystem names and procedure filenames
+
+4. Generate and validate subsystems.json
+
+5. Process PDF-generated JSON and display dashboard
+
+If the API fails:
+
+* Do not generate the dashboard.
+
+* Do not overwrite the previous valid `subsystems.json`.
+
+* Display a clear API error.
+
+* Allow the user to try again.
+
+The subsystem names returned by the API must become the keys in `subsystems.json`. Your application must not depend on predefined names such as Power Subsystem or Thermal Subsystem.
+
+## Step 5: Before considering the application complete
+
+There is one important thing I want to clarify: I have not executed these files together, so I cannot honestly guarantee that the application is working yet.
+
+I recommend that we perform a final consistency review of all the files together before you run it, particularly checking:
+
+* API response structure and parsing.
+
+* Safe updating of `subsystems.json`.
+
+* Preservation of previous generated JSON.
+
+* Correct subsystem-to-procedure matching.
+
+* Compatibility with Python 3.6.5.
+
+* Chart.js compatibility.
+
+* Error handling throughout the upload workflow.
+
+My recommendation: Don't make any more changes to `main.py` or `pdf_parser.py` yet. First, let's verify that the four updated files work together correctly.
+
+That way, we avoid introducing unnecessary changes into the PDF extraction logic that is already working.
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Now, the next step is to finish the consistency review before you run the application. Since you cannot test it yourself right now, I don't want you to replace files blindly and discover errors later.
+
+Let's do this in order.
+
+### Step 1: Keep your current project folder
+
+Don't delete or rename anything.
+
+Your folder should remain:
+
+```
+visualisation/
+│
+├── app.py
+├── main.py
+├── pdf_parser.py
+├── dashboard.py
+├── subsystems.json
+│
+├── input/
+├── output/
+│
+├── static/
+│   ├── chart.min.js
+│   └── style.css
+│
+└── templates/
+    └── index.html
+```
+
+### Step 2: Let me verify the complete code
+
+I want to check these four files together:
+
+1. `app.py`
+
+2. `dashboard.py`
+
+3. `templates/index.html`
+
+4. `static/style.css`
+
+In particular, I want to ensure that the API integration, dynamic subsystem names, error handling and dashboard generation are consistent.
+
+### Step 3: Then we will finalize the remaining files
+
+We will keep `main.py` and `pdf_parser.py` unchanged unless a genuine issue requires modifications.
+
+### Step 4: Final delivery
+
+I'll provide any corrected files one by one, with complete replacement code and clear instructions about where to put each file.
+
+We will also verify these requirements:
+
+* Real API IP can be entered in the designated location.
+
+* API-provided subsystem names become the JSON keys dynamically.
+
+* API-provided procedure filenames become the corresponding values.
+
+* API failure prevents dashboard generation.
+
+* Previous valid `subsystems.json` is preserved on API failure.
+
+* Clear error messages are displayed.
+
+* Users can retry.
+
+* Existing PDF extraction and dashboard comparison logic remain functional.
+
+* Python 3.6.5 compatibility is maintained.
+
+One thing I need from you now:
+
+Can you upload your current `visualisation` project as a ZIP file containing all the files and folders?
+
+That will let me inspect the actual versions together rather than relying on separate code snippets. Then I can give you the final corrected files without making you repeatedly change things.
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+Perfect! Now I have all four updated files:
+
+1. `app.py` – Flask application, PDF upload, API integration and processing.
+
+2. `dashboard.py` – Subsystem matching, execution filtering and dashboard calculations.
+
+3. `templates/index.html` – Dashboard webpage and Chart.js integration.
+
+4. `static/style.css` – Complete dashboard styling and responsive layout.
+
+I have reviewed the code you shared. The overall structure is sensible, and the four files are designed to work together. However, I would not recommend declaring the application fully working just yet. There are a few things we need to verify.
+
+## 1. Important things to check
+
+| Component      | What needs verification                            |
+| -------------- | -------------------------------------------------- |
+| `app.py`       | Actual API IP, endpoint and API response structure |
+| `dashboard.py` | Matching logic against your actual generated JSON  |
+| `index.html`   | Chart.js loading and correct template rendering    |
+| `style.css`    | Correct location and stylesheet loading            |
+
+### Two particularly important points
+
+1. API configuration
+
+Your current code contains:
+
+Python
+
+```
+API_URL = "http://01.02.03.40:5900/api/get_subsystem_filenames"
+```
+
+This is a dummy address. You must replace it with the actual API URL provided by your sir.
+
+2. Chart.js
+
+Your HTML expects this file:
+
+```
+static/chart.min.js
+```
+
+Make sure it actually exists. Otherwise, the dashboard may load without displaying the graph.
+
+## 2. Your project folder should look like this
+
+```
+Satellite_Dashboard/
+│
+├── app.py
+├── dashboard.py
+├── main.py
+├── subsystems.json
+│
+├── input/
+│
+├── output/
+│
+├── templates/
+│   └── index.html
+│
+└── static/
+    ├── style.css
+    └── chart.min.js
+```
+
+## 3. What I need from you next
+
+Before making further changes, I want to verify the complete application rather than unnecessarily rewrite files that are already correct.
+
+Please share these three things:
+
+1. Your existing `main.py` (the PDF-to-JSON conversion code).
+
+2. One sample JSON file generated by `main.py`.
+
+3. Your current `subsystems.json`.
+
+These are important because `dashboard.py` depends on the exact structure of your generated JSON, and the matching logic must agree with your actual procedure filenames and execution statuses.
+
+## 4. What we'll do next
+
+Once you share those files, I'll check:
+
+* PDF upload and processing.
+
+* API integration and subsystem configuration.
+
+* Automatic generation of JSON.
+
+* Exact and 90% similarity-based procedure matching.
+
+* Ambiguous and unmatched procedure handling.
+
+* Success and failure calculations.
+
+* Start-date and end-date filtering.
+
+* Latest execution selection.
+
+* Subsystem-wise graph and tooltips.
+
+* Unassigned procedure reporting.
+
+* Complete webpage and responsive styling.
+
+* Compatibility with Python 3.6.5.
+
+My recommendation: Don't change the four files again yet. Let's first verify them against `main.py` and your actual JSON data. That way, we can fix genuine integration problems instead of introducing new ones.
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+Excellent. Now we have the missing third piece: your actual `main.py`, the planned JSON structure, and your current `subsystems.json`.
+
+I have compared these with the four files you shared earlier. There is one important integration issue that we need to fix before running the complete application.
+
+# 1. Important issue found in your code
+
+Your `main.py` generates this:
+
+JSON
+
+```
+{
+    "example.tst": {
+        "procedures": [
+            {
+                "date_time": "2025-12-31 11:44:33.256",
+                "final_status": "Failure"
+            }
+        ]
+    }
+}
+```
+
+Notice that your `final_status` values are:
+
+* `Success`
+
+* `Failure`
+
+But your earlier `dashboard.py` uses:
+
+Python
+
+```
+final_status = str(
+    latest.get("final_status", "")
+).strip().lower()
+
+if final_status == "success":
+    ...
+elif final_status == "failure":
+    ...
+```
+
+This part is correct. Converting the status to lowercase handles both values.
+
+There are, however, some other things worth correcting.
+
+# 2. Changes required
+
+| File           | Finding                                          | Action                                                         |
+| -------------- | ------------------------------------------------ | -------------------------------------------------------------- |
+| `app.py`       | Uses an example API address                      | Replace with actual API URL                                    |
+| `app.py`       | Runs PDF conversion and API request concurrently | Correct approach                                               |
+| `dashboard.py` | Reads the expected `procedures` structure        | Compatible                                                     |
+| `dashboard.py` | Ignores `mode_executions`                        | Correct according to your intended overall execution reporting |
+| `main.py`      | Generates `Insights` separately                  | Compatible                                                     |
+| `index.html`   | Uses Chart.js                                    | Ensure the library exists                                      |
+| `style.css`    | Responsive layout                                | Compatible                                                     |
+
+# 3. One important correction to dashboard.py
+
+I recommend changing the date-filtering function slightly.
+
+Your current function excludes executions with invalid timestamps even when the user has not selected a date range.
+
+Replace the existing `filter_procedure_executions()` function with this:
+
+Python
+
+```
+def filter_procedure_executions(
+    procedure_data,
+    start_date=None,
+    end_date=None
+):
+    """
+    Return executions within the selected date range.
+
+    Both dates are inclusive.
+
+    When no date filter is selected, retain all executions.
+    When date filtering is enabled, invalid timestamps
+    are excluded.
+    """
+
+    executions = procedure_data.get(
+        "procedures", []
+    )
+
+    if not isinstance(executions, list):
+        raise ValueError(
+            "Invalid procedures list in generated JSON."
+        )
+
+    filtered = []
+
+    for execution in executions:
+
+        if not isinstance(execution, dict):
+            continue
+
+        execution_date = parse_datetime(
+            execution.get("date_time", "")
+        )
+
+        if execution_date is None:
+
+            if start_date is None and end_date is None:
+                filtered.append(
+                    (None, execution)
+                )
+
+            continue
+
+        execution_day = execution_date.date()
+
+        if start_date is not None:
+            if execution_day < start_date:
+                continue
+
+        if end_date is not None:
+            if execution_day > end_date:
+                continue
+
+        filtered.append(
+            (execution_date, execution)
+        )
+
+    return filtered
+```
+
+However, there is one more dependent change: `get_latest_execution()` must handle those `None` timestamps when no date filter is active.
+
+Replace its sorting section with:
+
+Python
+
+```
+valid_executions.sort(
+    key=lambda item: (
+        item[0] is not None,
+        item[0] or datetime.min
+    ),
+    reverse=True
+)
+
+return valid_executions[0][1]
+```
+
+This ensures valid timestamps are preferred, while executions without timestamps are still considered when no date filtering is selected.
+
+# 4. I need to verify one final file
+
+Your `main.py` imports:
+
+Python
+
+```
+from pdf_parser import (
+    parse_pdf_text,
+    normalize_procedure_name,
+    validate_execution
+)
+```
+
+This means your entire PDF extraction process depends on `pdf_parser.py`.
+
+I haven't seen that file yet.
+
+Please send me your complete `pdf_parser.py`.
+
+That is the last important source file I need to inspect.
+
+# 5. Final project structure
+
+Your project should look like this:
+
+```
+Satellite_Dashboard/
+│
+├── app.py
+├── main.py
+├── dashboard.py
+├── pdf_parser.py
+├── subsystems.json
+│
+├── input/
+│
+├── output/
+│
+├── templates/
+│   └── index.html
+│
+└── static/
+    ├── style.css
+    └── chart.min.js
+```
+
+# 6. What I want to achieve
+
+The final workflow should be:
+
+1. Enter project name and execution dates
+
+2. Upload multiple PDF reports
+
+3A. PDF-to-JSON conversion
+
+main.py and pdf_parser.py
+
+3B. Fetch subsystem information
+
+Subsystem API
+
+4. Match procedures with subsystems
+
+5. Apply execution date filtering
+
+6. Display final interactive dashboard
+
+Success, Failure, Unmatched, Ambiguous, Charts and Procedure Names
+
+Send me `pdf_parser.py` now. After checking it, I can give you the final corrected versions of all the files together, with their exact folder locations and instructions to run the application using Python 3.6.5.
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+I've reviewed your complete `pdf_parser.py` file.
+
+Overall, the code structure looks good and is compatible with Python 3.6.5. I don't see an obvious Python syntax error in the code you've shared.
+
+However, before we move forward, there are a few things worth checking.
+
+### 1. Important: Final status determination
+
+Currently, you have:
+
+Python
+
+```
+if status["failure"]:
+    final_status = "Failure"
+    final_status_reason = failure_reasons
+else:
+    final_status = "Success"
+    final_status_reason = "None"
+```
+
+This means that even if all STEP statuses are `Progress` or `Suspend`, the procedure will be marked as `Success`.
+
+We should confirm whether that is your intended business logic.
+
+### 2. OPERATING MODE handling
+
+Your code handles:
+
+```
+OPERATING MODE AUTO
+```
+
+and:
+
+```
+OPERATING MODE MANUAL
+```
+
+However, it does not currently handle the possibility that the PDF contains:
+
+```
+OPERATING MODE
+AUTO
+```
+
+If your PDFs use only the first format, this is not a problem.
+
+### 3. Dashboard compatibility
+
+One important connection needs verification.
+
+Your `pdf_parser.py` returns:
+
+Python
+
+```
+return executions, warnings
+```
+
+Your `dashboard.py` expects procedure data in this structure:
+
+Python
+
+```
+procedure_data.get("procedures", [])
+```
+
+Therefore, we need to verify that the code connecting these two files correctly wraps the parsed executions inside the `"procedures"` key.
+
+### 4. Other observations
+
+* Date and time extraction is structured properly.
+
+* Split date/time handling is implemented.
+
+* STEP ID detection is implemented.
+
+* Duplicate STEP IDs generate warnings.
+
+* AUTO/MANUAL mode tracking is implemented.
+
+* SINGLE STEP mode switching is implemented.
+
+* Failure reasons are collected.
+
+* Validation of execution status is implemented.
+
+### My recommendation
+
+Ready for integration review
+
+I would keep this file for now rather than making unnecessary changes.
+
+However, I don't want to declare the entire application correct until we verify how the parser output connects to the dashboard.
+
+Yes, let's move to the next step.
+
+Please share the next relevant file that connects `pdf_parser.py` with the JSON generation process. We'll verify that integration before making any further changes.
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Absolutely! Yes, we can do that. In fact, that's the best way to finalise the project because we can review everything together rather than checking files in isolation.
+
+Please upload all the files together:
+
+1. `main.py`
+
+2. `pdf_parser.py`
+
+3. `dashboard.py` (latest corrected version)
+
+4. The other four new Python/HTML files.
+
+5. `subsystems.json` (if it has changed).
+
+### How I'll review the project
+
+I'll perform a complete project review in this order:
+
+1. File-by-file review
+
+* Check syntax and indentation.
+
+* Check Python 3.6.5 compatibility.
+
+* Check logic and error handling.
+
+* Identify unnecessary or conflicting code.
+
+2. Integration review
+
+* Verify how all files communicate.
+
+* Check PDF extraction to JSON generation.
+
+* Check JSON structure against dashboard expectations.
+
+* Check date filtering and execution selection.
+
+* Check subsystem matching and status calculations.
+
+3. Bug review
+
+* Identify potential runtime errors.
+
+* Check edge cases.
+
+* Check whether existing functionality has been affected by the changes.
+
+4. Finalisation
+
+* Tell you exactly which files need changes.
+
+* Provide corrected code wherever necessary.
+
+* Avoid changing parts that are already working.
+
+* Give you a final testing checklist.
+
+Agreed — complete project review
+
+One important thing: I'll review all the files together before recommending changes. I won't ask you to keep modifying individual files unnecessarily.
+
+Upload all seven files, and we'll work towards finalising the project.
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+I have carefully reviewed all four files you have just shared:
+
+1. `app.py`
+
+2. `dashboard.py`
+
+3. `templates/index.html`
+
+4. `static/style.css`
+
+My honest verdict: The overall architecture is correct, and most of the planned functionality has been implemented. However, I would NOT finalise the project just yet. There are a few important issues that should be corrected before you consider it complete.
+
+I'll explain exactly what is working, what needs fixing, and what you should do with `subsystems.json`.
+
+# 1. Overall project review
+
+Overall assessment
+
+Not ready for finalisation
+
+| Component                   | Assessment       |
+| --------------------------- | ---------------- |
+| Flask application structure | Good             |
+| PDF upload handling         | Mostly good      |
+| API integration             | Needs actual API |
+| Concurrent execution        | Good             |
+| Subsystems JSON generation  | Good approach    |
+| Procedure matching          | Good approach    |
+| Date filtering              | Bug found        |
+| Latest execution selection  | Implemented      |
+| Unmatched procedures        | Implemented      |
+| Ambiguous matching          | Implemented      |
+| Dashboard visualisation     | Implemented      |
+| Responsive design           | Good             |
+
+# 2. Important issues that MUST be fixed
+
+I found four things that I would address before finalising.
+
+## Issue 1: Date validation in app.py
+
+Important bug
+
+Your HTML explicitly says:
+
+> Leave both fields empty to analyse all available execution dates.
+
+Your `dashboard.py` also supports optional dates.
+
+However, your `app.py` currently has:
+
+Python
+
+```
+validate_dates(
+    start_date,
+    end_date
+)
+```
+
+And your validation function requires both dates to be present:
+
+Python
+
+```
+start = datetime.strptime(
+    start_date,
+    "%Y-%m-%d"
+)
+
+end = datetime.strptime(
+    end_date,
+    "%Y-%m-%d"
+)
+```
+
+This means that if you leave both date fields empty, the application rejects the submission.
+
+This contradicts the planned functionality.
+
+Replace your entire `validate_dates()` function with:
+
+Python
+
+```
+def validate_dates(start_date, end_date):
+
+    start = None
+    end = None
+
+    if start_date:
+
+        try:
+            start = datetime.strptime(
+                start_date,
+                "%Y-%m-%d"
+            )
+
+        except ValueError:
+
+            raise ValueError(
+                "Please select a valid start date."
+            )
+
+    if end_date:
+
+        try:
+            end = datetime.strptime(
+                end_date,
+                "%Y-%m-%d"
+            )
+
+        except ValueError:
+
+            raise ValueError(
+                "Please select a valid end date."
+            )
+
+    if start and end and start > end:
+
+        raise ValueError(
+            "Start date cannot be later than end date."
+        )
+
+    return start_date, end_date
+```
+
+Now you can:
+
+* Select both dates.
+
+* Select only a start date.
+
+* Select only an end date.
+
+* Leave both dates empty.
+
+This also agrees with your existing `dashboard.py` implementation.
+
+## Issue 2: No Executions Found section is never displayed
+
+Important bug
+
+In `app.py`, you have:
+
+Python
+
+```
+if dashboard_data.get(
+    "no_executions_found",
+    False
+):
+
+    flash(
+        "No procedure executions found for "
+        "the selected date range."
+    )
+
+    dashboard_data = None
+```
+
+But in your HTML, you have already implemented a separate section:
+
+HTML
+
+```
+{% if dashboard_data.no_executions_found %}
+```
+
+The problem is that you set `dashboard_data = None` before the HTML can display that section.
+
+Correction:
+
+Remove this line from the no-executions branch:
+
+Python
+
+```
+dashboard_data = None
+```
+
+Keep the flash message.
+
+Your application will then be able to display the dedicated No Executions Found section you designed.
+
+## Issue 3: Dummy API IP address
+
+Required before actual execution
+
+Your `app.py` currently contains:
+
+Python
+
+```
+API_URL = (
+    "http://01.02.03.40:5900/api/get_subsystem_filenames"
+)
+```
+
+This is explicitly a placeholder.
+
+You must replace it with the actual API endpoint supplied by your sir.
+
+Also verify that the API:
+
+* Accepts a POST request.
+
+* Accepts `project_name` in JSON.
+
+* Returns subsystem information inside `data`.
+
+* Returns filenames as lists of strings.
+
+Your application expects this response structure:
+
+JSON
+
+```
+{
+    "data": {
+        "POWER": [
+            "ab-abc.tst",
+            "bc-bst.tst"
+        ],
+        "ILC": [
+            "ab-sdc.tst",
+            "rc-bst.tst"
+        ]
+    }
+}
+```
+
+If the actual API response differs, your API processing function must be adjusted accordingly.
+
+Until you connect and test the actual API, API integration cannot be considered verified.
+
+## Issue 4: Generated JSON output path
+
+Your `run_pdf_converter()` function reads the output path printed by `main.py`.
+
+However, it checks:
+
+Python
+
+```
+if not os.path.isfile(output_path):
+```
+
+If `main.py` prints a relative path, this check could fail when Flask is launched from a different working directory.
+
+A safer correction is to insert this immediately after extracting `output_path`:
+
+Python
+
+```
+if not os.path.isabs(output_path):
+
+    output_path = os.path.join(
+        BASE_DIR,
+        output_path
+    )
+
+output_path = os.path.abspath(
+    output_path
+)
+```
+
+This ensures that your Flask application checks the correct generated JSON file.
+
+# 3. Review of dashboard.py
+
+Your dashboard processing logic is structured well.
+
+Here is what I verified from the code.
+
+| Planned functionality           | Implementation |
+| ------------------------------- | -------------- |
+| Exact filename matching         | Yes            |
+| Similarity-based matching       | Yes            |
+| 90% similarity threshold        | Yes            |
+| Ambiguous matching detection    | Yes            |
+| Duplicate assignment prevention | Yes            |
+| Latest execution selection      | Yes            |
+| Date-range filtering            | Yes            |
+| Inclusive date filtering        | Yes            |
+| Ignore global Insights          | Yes            |
+| Success/failure classification  | Yes            |
+| Unmatched procedures            | Yes            |
+| Unassigned procedures           | Yes            |
+| Subsystem-wise counts           | Yes            |
+| Success/failure percentages     | Yes            |
+
+There is one additional detail worth knowing.
+
+Your date filtering excludes invalid timestamps when date filters are selected. When both dates are empty, executions with invalid timestamps can still be included.
+
+This is how your current code is written. If you want only executions with valid timestamps in every situation, that behaviour needs to be changed.
+
+Also, your similarity matching is a heuristic. A 90% match does not guarantee that two procedure filenames represent the same procedure. You should test it against actual procedure names before relying on the results.
+
+My assessment: The core dashboard logic is implemented, but it still needs testing against your actual generated JSON and subsystem API response.
+
+# 4. Review of index.html
+
+Your HTML is generally good.
+
+I checked the important connections between the frontend and backend.
+
+* Project name is submitted correctly.
+
+* Multiple PDF upload is supported.
+
+* Start and end dates are submitted correctly.
+
+* Date limits are dynamically updated.
+
+* Flash messages are displayed.
+
+* Subsystem cards are generated dynamically.
+
+* Success and failure procedure names are displayed.
+
+* Unmatched and ambiguous procedures are displayed.
+
+* Unassigned procedures are displayed.
+
+* Chart data is passed from Flask using Jinja's `tojson`.
+
+* The chart tooltip displays procedure names.
+
+One thing to verify: your `chart.min.js` must be a Chart.js version compatible with your chart configuration. Your code uses Chart.js 3-or-newer syntax. If your local file is Chart.js 2, the chart configuration will need adjustment.
+
+Apart from that, the HTML structure is consistent with the dashboard data returned by `dashboard.py`.
+
+# 5. Review of style.css
+
+Your CSS is good.
+
+It includes:
+
+* Consistent layout.
+
+* Responsive subsystem cards.
+
+* Responsive upload section.
+
+* Desktop and mobile layouts.
+
+* Chart container styling.
+
+* Success and failure colours.
+
+* Procedure detail styling.
+
+* Focus indicators for accessibility.
+
+* Appropriate spacing and typography.
+
+I don't see a critical CSS issue that would prevent the dashboard from displaying.
+
+No major rewrite is necessary.
+
+# 6. MOST IMPORTANT: What should you do with subsystems.json?
+
+This is important because your application now retrieves subsystem information dynamically from the API.
+
+My recommendation: DO NOT EMPTY `subsystems.json`.
+
+Keep it as a valid JSON file containing your existing subsystem configuration.
+
+For example:
+
+JSON
+
+```
+{
+    "POWER": [
+        "ab-abc.tst",
+        "bc-bst.tst"
+    ],
+    "ILC": [
+        "ab-sdc.tst",
+        "rc-bst.tst"
+    ]
+}
+```
+
+The actual subsystem names and filenames should be your real configuration, not these examples.
+
+### What happens when you execute the application?
+
+Your current `app.py` follows this sequence:
+
+1. Enter project name and upload PDFs
+
+2. Two operations run simultaneously
+
+   * PDF processing through `main.py`
+
+   * Subsystem API request
+
+3. API returns subsystem information
+
+   The returned information is validated.
+
+4. Update subsystems.json
+
+   The new API information replaces the previous configuration.
+
+5. Process dashboard
+
+   `dashboard.py` reads the newly generated `subsystems.json`.
+
+6. Display dashboard
+
+   Subsystem-wise results are displayed.
+
+### So what is the correct approach?
+
+| Situation                       | What to do                         |
+| ------------------------------- | ---------------------------------- |
+| Before running the application  | Keep valid JSON                    |
+| During successful API execution | Automatically replace its contents |
+| API fails                       | Existing JSON remains unchanged    |
+| API returns empty subsystems    | Existing JSON remains unchanged    |
+| You manually empty the file     | Don't do this                      |
+
+One important distinction: your application updates `subsystems.json` only after both the PDF conversion and API request succeed. If the API fails, the previous file is preserved.
+
+However, if the API and PDF processing succeed but dashboard generation subsequently fails, the new configuration will already have replaced the old one.
+
+# 7. Final testing checklist before submission
+
+I strongly recommend running these tests before calling the project complete.
+
+Project verification
+
+0/27 completed
+
+1. Application and API
+
+Flask application starts successfully.
+
+Actual subsystem API connects successfully.
+
+Correct subsystem information is returned for the entered project.
+
+API failure produces an understandable error message.
+
+2. PDF processing
+
+Upload one PDF successfully.
+
+Upload multiple PDFs successfully.
+
+Old input PDFs are not included in a new processing run.
+
+Generated JSON is the newly created output, not an older file.
+
+3. Date filtering
+
+Both dates empty: all available executions are analysed.
+
+Both dates selected: only executions in the inclusive range are analysed.
+
+Only start date selected: executions from that date onwards are analysed.
+
+Only end date selected: executions up to that date are analysed.
+
+Start date later than end date produces a validation error.
+
+No executions in the selected range displays the dedicated no-data section.
+
+4. Dashboard results
+
+Exact filename matching works.
+
+90% similarity matching works.
+
+Ambiguous matches are identified.
+
+Duplicate procedure assignments are prevented.
+
+Latest execution determines the displayed status.
+
+Unmatched procedures are displayed.
+
+Unassigned procedures are displayed.
+
+Success and failure counts are correct.
+
+Chart displays the correct procedure counts and names.
+
+5. Final application
+
+Dashboard displays correctly on desktop.
+
+Dashboard displays correctly on mobile.
+
+subsystems.json updates after a successful API response.
+
+Existing subsystems.json is preserved after an API failure.
+
+27 tests remaining
+
+Reset checklist
+
+# 8. My final verdict
+
+I would classify the project as follows:
+
+* Architecture: Good.
+
+* Implementation: Mostly complete.
+
+* Integration: Not yet verified against the actual API.
+
+* Execution: Needs testing and the corrections above.
+
+* Final submission: Not yet.
+
+The most important corrections are the optional date validation, the no-executions display, the real API endpoint and the output path handling.
+
+Also, I have reviewed the four files in your latest message. I cannot certify the entire seven-file project without checking the other three files together with these, particularly `main.py` and its JSON output structure.
+
+My suggestion: Don't rewrite everything. Your current implementation is a good foundation. Fix the identified issues, then test the complete seven-file application as one integrated project. Once those tests pass, you can confidently finalise it.
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+I have reviewed all four parts you shared:
+
+1. `app.py`
+
+2. `dashboard.py`
+
+3. `templates/index.html`
+
+4. `static/style.css`
+
+I have also considered the two unchanged files (`main.py` and `pdf_parser.py`) and your existing `subsystems.json`.
+
+My verdict: Your overall project structure and implementation logic are good. However, I would not recommend replacing all your files and proceeding directly to final testing just yet. There are a few important things to correct or verify first.
+
+Let me explain exactly what is correct, what needs attention, and what you should do next.
+
+# 1. Overall project architecture
+
+Your intended workflow is logically correct.
+
+User opens Flask dashboard
+
+Enters project name, dates and uploads PDF reports
+
+Flask validates user inputs
+
+Project name, dates and PDF files
+
+Operation A
+
+`main.py`
+
+PDF processing and JSON generation
+
+Operation B
+
+Subsystem API
+
+Retrieves subsystem filenames
+
+Update subsystems.json
+
+Only after both operations succeed
+
+dashboard.py
+
+Matches procedure filenames, filters dates and calculates statuses
+
+HTML Dashboard
+
+Charts, subsystem details, successful procedures, failed procedures and unassigned procedures
+
+This architecture makes sense. Running the PDF conversion and API request concurrently is also a reasonable approach.
+
+# 2. Review of each file
+
+## A. `app.py`
+
+Mostly correct
+
+The following implementations are good:
+
+* Folder creation.
+
+* PDF extension validation.
+
+* Date validation.
+
+* Secure filename handling using `secure_filename()`.
+
+* API timeout handling.
+
+* API response structure validation.
+
+* Temporary JSON file before replacing `subsystems.json`.
+
+* ThreadPoolExecutor for concurrent execution.
+
+* Processing lock to prevent simultaneous submissions.
+
+* Passing the generated JSON path and date filters to `process_dashboard()`.
+
+However, I noticed some important issues.
+
+Issue 1: API URL is still a dummy address.
+
+Python
+
+```
+API_URL = (
+    "http://01.02.03.40:5900/api/get_subsystem_filenames"
+)
+```
+
+You must replace this with the actual API address provided by your supervisor.
+
+Also confirm:
+
+* Whether the API uses POST.
+
+* Whether it expects `project_name` in the JSON body.
+
+* Whether the response actually contains a `data` dictionary.
+
+* Whether the filename values are lists of strings.
+
+Without this confirmation, API integration cannot be considered complete.
+
+Issue 2: Generated JSON path handling.
+
+Currently:
+
+Python
+
+```
+if not os.path.isfile(output_path):
+```
+
+If `main.py` prints a relative path, this check can fail when Flask is started from another working directory.
+
+Use:
+
+Python
+
+```
+if not os.path.isabs(output_path):
+    output_path = os.path.join(
+        BASE_DIR,
+        output_path
+    )
+
+output_path = os.path.abspath(output_path)
+
+if not os.path.isfile(output_path):
+    raise RuntimeError(
+        "The PDF converter did not generate "
+        "the expected output JSON file."
+    )
+```
+
+Issue 3: Old input PDFs are deleted before API success.
+
+Your current sequence is:
+
+1. Delete old input PDFs.
+
+2. Save new PDFs.
+
+3. Run PDF processing and API concurrently.
+
+If the API fails, the previous input PDFs are already gone.
+
+This does not necessarily break dashboard generation, but it is not fully transactional.
+
+If preserving previous files is important, use a temporary upload directory and move the new files into `input` only after successful validation.
+
+Issue 4: File upload protection.
+
+Add a maximum upload size to prevent unexpectedly large uploads.
+
+For example:
+
+Python
+
+```
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+```
+
+This sets a 50 MB total request limit. Adjust it according to your actual PDF requirements.
+
+Also, your `clear_old_input_pdfs()` only removes lowercase `.pdf` files. On Linux, previously uploaded `.PDF` files will remain.
+
+## B. `dashboard.py`
+
+Core logic is good
+
+This is an important part of your project, and the overall approach is sensible.
+
+I checked the following:
+
+| Functionality                              | Review                                     |
+| ------------------------------------------ | ------------------------------------------ |
+| Filename normalization                     | Correct                                    |
+| Exact filename matching                    | Correct                                    |
+| 90% similarity threshold                   | Correct                                    |
+| Ambiguous match detection                  | Correct                                    |
+| Date parsing                               | Correct for the two specified formats      |
+| Inclusive date filtering                   | Correct                                    |
+| Latest execution selection                 | Correct for valid timestamps               |
+| Subsystem-wise success/failure calculation | Correct                                    |
+| Unmatched procedure identification         | Correct                                    |
+| Unassigned procedure identification        | Mostly correct                             |
+| No executions detection                    | Correct for the defined execution criteria |
+
+There are, however, two things I would pay attention to.
+
+Issue 1: Unknown execution statuses.
+
+You currently handle:
+
+Python
+
+```
+if final_status == "success":
+```
+
+and:
+
+Python
+
+```
+elif final_status == "failure":
+```
+
+If the latest execution has a status such as `ERROR`, `ABORTED`, or `IN PROGRESS`, it gets classified as unmatched.
+
+That is acceptable if your requirement is specifically to display only Success and Failure.
+
+However, confirm the actual `final_status` values produced by `main.py`.
+
+Issue 2: Filename matching can produce incorrect assignments.
+
+Your matching algorithm uses:
+
+Python
+
+```
+SIMILARITY_THRESHOLD = 0.90
+```
+
+This is a reasonable starting threshold, but 90% similarity does not guarantee that two filenames represent the same procedure.
+
+For example, similar procedure names can belong to different subsystems.
+
+Your ambiguity handling is helpful, but you should test the matching logic against actual filenames from your satellite testing reports.
+
+I would retain your current matching implementation until those tests show a genuine problem.
+
+## C. `templates/index.html`
+
+Structure is correct
+
+Your HTML template is consistent with the dictionary returned by `process_dashboard()`.
+
+I checked the important variable connections:
+
+| HTML variable                 | Python output           | Status  |
+| ----------------------------- | ----------------------- | ------- |
+| `dashboard_data.project_name` | `project_name`          | Correct |
+| `dashboard_data.date_range`   | `date_range`            | Correct |
+| `dashboard_data.subsystems`   | `subsystems`            | Correct |
+| `subsystem.success`           | `success`               | Correct |
+| `subsystem.failure`           | `failure`               | Correct |
+| `subsystem.unmatched`         | `unmatched`             | Correct |
+| `subsystem.ambiguous`         | `ambiguous`             | Correct |
+| `unassigned_procedures`       | `unassigned_procedures` | Correct |
+| `no_executions_found`         | `no_executions_found`   | Correct |
+
+Your date filters, file selection display, subsystem cards and procedure details are also logically connected.
+
+One important thing to verify: Chart.js version.
+
+Your template uses Chart.js 3-or-later configuration:
+
+JavaScript
+
+```
+interaction: {
+    intersect: false,
+    mode: 'index'
+}
+```
+
+And:
+
+JavaScript
+
+```
+scales: {
+    x: {
+        stacked: true
+    },
+    y: {
+        stacked: true
+    }
+}
+```
+
+This configuration is suitable for Chart.js 3 and 4, but not the older Chart.js 2 configuration.
+
+Therefore, check the actual version of:
+
+```
+static/chart.min.js
+```
+
+I recommend Chart.js 4 if your browser environment supports it.
+
+Also, your template uses JavaScript arrow functions and `const`, so it assumes a modern browser.
+
+## D. `static/style.css`
+
+Looks good
+
+Your CSS is properly organized.
+
+I checked:
+
+* Desktop layout.
+
+* Responsive subsystem grid.
+
+* Mobile layout.
+
+* Upload section.
+
+* Dashboard heading.
+
+* Chart container.
+
+* Success and failure colors.
+
+* Procedure details.
+
+* Footer.
+
+* Accessibility focus styles.
+
+I did not find an obvious CSS issue that would prevent the dashboard from rendering.
+
+You can retain this stylesheet.
+
+# 3. Review of `subsystems.json`
+
+Your existing JSON structure is valid.
+
+For example:
+
+JSON
+
+```
+{
+    "Power Subsystem": [
+        "example.tst",
+        "sample.sh",
+        "power_check.tst"
+    ]
+}
+```
+
+This matches what your `dashboard.py` expects:
+
+Python
+
+```
+for subsystem_name, configured_names in subsystems.items():
+```
+
+However, there is one important architectural distinction.
+
+Important
+
+Your initial `subsystems.json` contains example procedure filenames.
+
+But after integration, `app.py` replaces the entire file using the subsystem API response.
+
+Therefore:
+
+* The existing JSON is your initial configuration.
+
+* The API response becomes the new configuration.
+
+* The dashboard uses the newly generated configuration.
+
+* The initial example filenames will no longer be used after a successful API update.
+
+That is correct if this is your intended requirement.
+
+One thing to verify is whether your API returns all ten subsystem names and their corresponding procedure filenames.
+
+# 4. The two unchanged files: `main.py` and `pdf_parser.py`
+
+This is the biggest remaining verification point.
+
+You mentioned that these two files will remain unchanged.
+
+That is fine, provided they satisfy the interfaces expected by your new files.
+
+Before proceeding, confirm the following.
+
+| Requirement     | Expected behavior                               |
+| --------------- | ----------------------------------------------- |
+| `main.py`       | Reads PDFs from the `input` directory           |
+| `main.py`       | Generates the procedure JSON                    |
+| `main.py`       | Prints `Output file: <path>`                    |
+| Generated JSON  | Contains procedure names as top-level keys      |
+| Generated JSON  | Contains a `procedures` list for each procedure |
+| Execution data  | Contains `date_time`                            |
+| Execution data  | Contains `final_status`                         |
+| `pdf_parser.py` | Continues working with your existing PDF format |
+
+Your new `dashboard.py` specifically expects data resembling:
+
+JSON
+
+```
+{
+    "power_check.tst": {
+        "procedures": [
+            {
+                "date_time": "2026-11-12 10:30:00",
+                "final_status": "success"
+            },
+            {
+                "date_time": "2026-11-12 11:45:00",
+                "final_status": "failure"
+            }
+        ]
+    }
+}
+```
+
+If your unchanged `main.py` generates a different JSON structure, the dashboard will not work correctly.
+
+I cannot certify compatibility with those two files without examining their actual contents.
+
+# 5. Important Python 3.6.5 compatibility check
+
+Your new Python files avoid newer Python syntax such as f-strings, so the code is generally compatible with Python 3.6.5.
+
+However, your installed package versions also matter.
+
+I recommend checking your environment:
+
+Bash
+
+```
+python --version
+```
+
+And:
+
+Bash
+
+```
+pip show Flask requests Werkzeug
+```
+
+Do not automatically install the newest versions of these packages into Python 3.6.5.
+
+Python 3.6 is end-of-life, so you should use package versions that explicitly support it and keep the application on a trusted local or otherwise protected environment.
+
+# 6. My final assessment
+
+| Project component          | Assessment                                |
+| -------------------------- | ----------------------------------------- |
+| Flask application          | Good, minor corrections needed            |
+| API integration            | Structure good, actual API unverified     |
+| Concurrent processing      | Correct approach                          |
+| JSON generation            | Good                                      |
+| Filename matching          | Good, requires real-data testing          |
+| Date filtering             | Good                                      |
+| Dashboard calculations     | Good, requires output-schema verification |
+| HTML template              | Good                                      |
+| CSS                        | Good                                      |
+| Existing `main.py`         | Not yet verified                          |
+| Existing `pdf_parser.py`   | Not yet verified                          |
+| Existing `subsystems.json` | Valid initial structure                   |
+
+My recommendation: Do not replace everything and immediately declare the project complete. First verify the integration points.
+
+# 7. What I need to check before giving you the final go-ahead
+
+Please share the actual contents of these two unchanged files:
+
+1. `main.py`
+
+2. `pdf_parser.py`
+
+I particularly want to check that the JSON generated by your existing PDF converter matches the structure expected by the new `dashboard.py`.
+
+Also, tell me whether you already have the actual subsystem API URL and its sample response.
+
+Once I examine those, I can check the entire integration and tell you precisely:
+
+* Whether all six files work together.
+
+* Whether any existing functionality will break.
+
+* Whether the API and PDF processing work together correctly.
+
+* Whether the dashboard displays the correct results.
+
+* Whether you can safely replace the existing files and proceed with testing.
+
+For now, keep your original project files backed up. Your proposed implementation is a good foundation, but I would make the final replacement only after checking `main.py` and `pdf_parser.py`.
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
