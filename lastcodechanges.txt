@@ -3516,3 +3516,65 @@ Just make sure the API URL and response format are correct.
 
 My suggestion: Don't delete or modify any of your existing files other than the four replacements tomorrow. Keep a backup before starting.
 
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+Yes! You understood correctly. 😊
+
+### 1. What do you need to change?
+
+Only one important configuration change in `app.py`:
+
+Python
+
+```
+API_URL = (
+    "http://01.02.03.40:5900/api/get_subsystem_filenames"
+)
+```
+
+Replace the dummy IP and URL with the actual API URL provided by your sir.
+
+### 2. Do you need an API key?
+
+No API key is currently required by the code you shared.
+
+Your code does not contain an API-key authentication mechanism. It sends the project name using a JSON POST request.
+
+If your sir's API requires authentication, you'll need to add that separately. Otherwise, nothing extra is needed.
+
+### 3. How do you run the project?
+
+Yes, you start the application using `app.py` only.
+
+Open your terminal in the project directory and execute:
+
+Bash
+
+```
+python app.py
+```
+
+Then open your browser:
+
+```
+http://127.0.0.1:5000
+```
+
+### 4. Your final checklist
+
+* Replace the four files.
+
+* Keep `main.py` and `pdf_parser.py` unchanged.
+
+* Keep `subsystems.json` initially.
+
+* Replace the dummy API URL with the actual API URL.
+
+* Ensure required Python packages are installed.
+
+* Run `python app.py`.
+
+That's it! You don't need to run `dashboard.py`, `main.py`, or `pdf_parser.py` separately. The Flask application invokes the required processing automatically.
+
+One condition: your API must be accessible, and `main.py` must work with the existing PDF-processing setup.
