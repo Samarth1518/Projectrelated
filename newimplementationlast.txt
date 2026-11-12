@@ -1,0 +1,86 @@
+1. Final implementation plan
+Change 1: Date filtering on the dashboard webpage
+
+The webpage will have three inputs:
+
+Project Name – remains as it is.
+
+PDF File Upload – remains as it is.
+
+Date Selection – new addition.
+
+Date selection will have two options:
+
+Select execution period
+
+Overall – Fetch all executions (existing behaviour).
+Customized – Select a date range.
+
+When Customized is selected:
+
+Start date
+Start date
+End date
+End date
+
+Illustrative layout, not an implementation of your webpage yet.
+
+The backend will:
+
+Read the execution information from output.json.
+
+Filter executions between the selected start and end dates.
+
+If a procedure has multiple executions within that range, retain only its latest execution.
+
+Exclude procedures with no executions in that range.
+
+Display this message if nothing matches:
+
+No procedure executions found for the selected date range.
+
+Overall will retain the existing behaviour without date filtering.
+
+Change 2: Automatically generate subsystems.json using the API
+
+This is how I understand your required workflow:
+
+User enters project name and uploads PDFs
+
+User clicks Generate Dashboard
+
+Process A
+
+main.py and PDF parser.py
+
+output.json
+
+Process B
+
+Call API with project name
+
+Generate subsystems.json
+
+Compare output.json with subsystems.json
+
+Generate Dashboard
+
+Important implementation details:
+
+The API is called only when Generate Dashboard is clicked.
+
+Python will use requests to call the API.
+
+The API response will be converted into the required subsystems.json structure.
+
+All subsystem names and filenames will be taken dynamically. There will be no fixed number of subsystems.
+
+The previous JSON will be replaced only after a successful API response and validation.
+
+If the API fails, the old valid subsystems.json will remain untouched.
+
+The dashboard will not be generated if the API fails.
+
+The user will receive a clear error message and can retry.
+
+One important technical detail: although both processes can run simultaneously, dashboard generation must wait until both processes finish successfully. Otherwise, the comparison might use an outdated file.
